@@ -12,8 +12,10 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -42,6 +44,35 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
+fun parseAddedTimestamp(addedStr: String?): Long {
+    if (addedStr.isNullOrBlank()) return 0L
+    val asLong = addedStr.toLongOrNull()
+    if (asLong != null) {
+        return if (asLong < 10000000000L) asLong * 1000L else asLong
+    }
+    try {
+        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ENGLISH)
+        return sdf.parse(addedStr)?.time ?: 0L
+    } catch (_: Exception) {
+        try {
+            val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH)
+            return sdf.parse(addedStr)?.time ?: 0L
+        } catch (_: Exception) {
+            return 0L
+        }
+    }
+}
+
+fun getAbsoluteImageUrl(serverUrl: String, iconUrl: String?): String? {
+    if (iconUrl.isNullOrBlank()) return null
+    if (iconUrl.startsWith("http://") || iconUrl.startsWith("https://")) {
+        return iconUrl
+    }
+    val cleanBase = serverUrl.trimEnd('/')
+    val cleanPath = iconUrl.trimStart('/')
+    return "$cleanBase/$cleanPath"
+}
+
 enum class SeriesSortMode(val label: String) {
     ALPHA_ASC("A-Z"),
     ALPHA_DESC("Z-A"),
@@ -57,6 +88,7 @@ data class SeriesData(
     val coverUrl: String?,
     val categoryId: String,
     val releaseDate: String? = null,
+    val lastModified: String? = null,
     val rating: Float = 0f
 )
 
@@ -88,7 +120,7 @@ fun MainSeriesScreen(
     password: String,
     timezoneId: String = "Europe/Rome",
     onBack: () -> Unit,
-    onEpisodeSelect: (SeriesEpisode, startPositionMs: Long) -> Unit
+    onEpisodeSelect: (SeriesEpisode, startPositionMs: Long, onNextEp: (() -> Unit)?) -> Unit
 ) {
     SeriesScreen(
         serverUrl = serverUrl,
@@ -107,8 +139,10 @@ fun SeriesScreen(
     password: String,
     timezoneId: String = "Europe/Rome",
     onBack: () -> Unit,
-    onEpisodeSelect: (SeriesEpisode, startPositionMs: Long) -> Unit
+    onEpisodeSelect: (SeriesEpisode, startPositionMs: Long, onNextEp: (() -> Unit)?) -> Unit
 ) {
+    BackHandler { onBack() }
+
     val context = LocalContext.current
     val watchPrefs = remember { WatchPreferences(context) }
 
@@ -177,13 +211,18 @@ fun SeriesScreen(
 
                     for (i in 0 until jsonArr.length()) {
                         val obj = jsonArr.getJSONObject(i)
+                        val rawCover = obj.optString("cover")
+                        val fullCover = getAbsoluteImageUrl(serverUrl, rawCover)
+                        val lastMod = obj.optString("last_modified").ifEmpty { obj.optString("added") }
+
                         list.add(
                             SeriesData(
                                 seriesId = obj.optString("series_id"),
                                 title = obj.optString("name"),
-                                coverUrl = obj.optString("cover"),
+                                coverUrl = fullCover,
                                 categoryId = obj.optString("category_id"),
                                 releaseDate = obj.optString("releaseDate", obj.optString("last_modified")),
+                                lastModified = lastMod,
                                 rating = obj.optString("rating_5based", "0").toFloatOrNull() ?: 0f
                             )
                         )
@@ -214,6 +253,7 @@ fun SeriesScreen(
             serverUrl = serverUrl,
             username = username,
             password = password,
+            timezoneId = timezoneId,
             onBack = {
                 selectedSeriesForDetail = null
                 favoriteIds = watchPrefs.getSeriesFavorites()
@@ -238,7 +278,7 @@ fun SeriesScreen(
             .let { list ->
                 if (selectedCategory?.id == "RECENT") {
                     list.sortedWith(
-                        compareByDescending<SeriesData> { it.releaseDate ?: "" }
+                        compareByDescending<SeriesData> { parseAddedTimestamp(it.lastModified) }
                             .thenByDescending { it.seriesId.toLongOrNull() ?: 0L }
                     )
                 } else {
@@ -246,7 +286,7 @@ fun SeriesScreen(
                         SeriesSortMode.ALPHA_ASC -> list.sortedBy { s -> s.title.lowercase(Locale.getDefault()) }
                         SeriesSortMode.ALPHA_DESC -> list.sortedByDescending { s -> s.title.lowercase(Locale.getDefault()) }
                         SeriesSortMode.NEWEST -> list.sortedWith(
-                            compareByDescending<SeriesData> { it.releaseDate ?: "" }
+                            compareByDescending<SeriesData> { parseAddedTimestamp(it.lastModified) }
                                 .thenByDescending { it.seriesId.toLongOrNull() ?: 0L }
                         )
                     }
@@ -297,7 +337,7 @@ fun SeriesScreen(
                             contentPadding = PaddingValues(12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            items(categories) { category ->
+                            items(categories, key = { it.id }) { category ->
                                 val isSelected = category.id == selectedCategory?.id
                                 CategorySidebarItem(
                                     category = category,
@@ -341,7 +381,7 @@ fun SeriesScreen(
                             contentPadding = PaddingValues(bottom = 16.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(filteredList) { item ->
+                            items(filteredList, key = { it.seriesId }) { item ->
                                 val isFav = favoriteIds.contains(item.seriesId)
                                 SeriesCardItem(
                                     series = item,
@@ -705,8 +745,7 @@ fun SeriesCardItem(
                 text = "(${series.releaseDate})",
                 color = if (isFocused) Color(0xFFFFC107) else Color.LightGray,
                 fontSize = 9.sp,
-                textAlign = TextAlign.Center,
-                fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Normal
+                textAlign = TextAlign.Center
             )
         }
     }
@@ -718,8 +757,9 @@ fun SeriesDetailContent(
     serverUrl: String,
     username: String,
     password: String,
+    timezoneId: String,
     onBack: () -> Unit,
-    onEpisodeSelect: (SeriesEpisode, startPositionMs: Long) -> Unit
+    onEpisodeSelect: (SeriesEpisode, startPositionMs: Long, onNextEp: (() -> Unit)?) -> Unit
 ) {
     BackHandler { onBack() }
 
@@ -747,10 +787,13 @@ fun SeriesDetailContent(
                     val jsonObj = JSONObject(res)
                     val infoObj = jsonObj.optJSONObject("info")
 
+                    val rawCover = infoObj?.optString("cover", series.coverUrl ?: "") ?: series.coverUrl
+                    val fullCover = getAbsoluteImageUrl(serverUrl, rawCover)
+
                     detailInfo = SeriesDetailInfo(
                         seriesId = series.seriesId,
                         name = infoObj?.optString("name", series.title) ?: series.title,
-                        cover = infoObj?.optString("cover", series.coverUrl ?: "") ?: series.coverUrl,
+                        cover = fullCover,
                         plot = infoObj?.optString("plot", "Nessuna trama disponibile."),
                         director = infoObj?.optString("director", "-"),
                         releaseDate = infoObj?.optString("releaseDate", series.releaseDate ?: ""),
@@ -772,6 +815,9 @@ fun SeriesDetailContent(
                         for (i in 0 until epArray.length()) {
                             val ep = epArray.getJSONObject(i)
                             val info = ep.optJSONObject("info")
+                            val rawEpCover = info?.optString("movie_image")
+                            val fullEpCover = getAbsoluteImageUrl(serverUrl, rawEpCover)
+
                             epList.add(
                                 SeriesEpisode(
                                     id = ep.optString("id"),
@@ -779,7 +825,7 @@ fun SeriesDetailContent(
                                     seasonNumber = ep.optInt("season", seasonNum),
                                     episodeNumber = ep.optInt("episode", i + 1),
                                     containerExtension = ep.optString("container_extension", "mp4"),
-                                    coverUrl = info?.optString("movie_image")
+                                    coverUrl = fullEpCover
                                 )
                             )
                         }
@@ -796,6 +842,31 @@ fun SeriesDetailContent(
                 isLoading = false
             }
         }
+    }
+
+    val currentEpisodes = episodesMap[selectedSeason] ?: emptyList()
+
+    fun playEpisode(ep: SeriesEpisode, startPos: Long) {
+        watchPrefs.saveSeriesEpisodeMapping(series.seriesId, ep.id)
+
+        val epIndex = currentEpisodes.indexOfFirst { it.id == ep.id }
+        val nextEp = if (epIndex != -1 && epIndex + 1 < currentEpisodes.size) {
+            currentEpisodes[epIndex + 1]
+        } else {
+            val seasonIdx = seasonsList.indexOf(selectedSeason)
+            if (seasonIdx != -1 && seasonIdx + 1 < seasonsList.size) {
+                val nextSeasonNum = seasonsList[seasonIdx + 1]
+                episodesMap[nextSeasonNum]?.firstOrNull()
+            } else null
+        }
+
+        val onNextEpLambda: (() -> Unit)? = if (nextEp != null) {
+            {
+                playEpisode(nextEp, 0L)
+            }
+        } else null
+
+        onEpisodeSelect(ep, startPos, onNextEpLambda)
     }
 
     // Dialog di ripresa visione episodio
@@ -819,8 +890,7 @@ fun SeriesDetailContent(
                     onClick = {
                         val epToPlay = selectedEpisodeForPlayback!!
                         selectedEpisodeForPlayback = null
-                        watchPrefs.saveSeriesEpisodeMapping(series.seriesId, epToPlay.id)
-                        onEpisodeSelect(epToPlay, savedProgressMs)
+                        playEpisode(epToPlay, savedProgressMs)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFC107)),
                     shape = RoundedCornerShape(6.dp)
@@ -834,8 +904,7 @@ fun SeriesDetailContent(
                         val epToPlay = selectedEpisodeForPlayback!!
                         watchPrefs.clearPosition(epToPlay.id)
                         selectedEpisodeForPlayback = null
-                        watchPrefs.saveSeriesEpisodeMapping(series.seriesId, epToPlay.id)
-                        onEpisodeSelect(epToPlay, 0L)
+                        playEpisode(epToPlay, 0L)
                     }
                 ) {
                     Text("Ricomincia da capo", color = Color.Red, fontWeight = FontWeight.Bold)
@@ -849,63 +918,30 @@ fun SeriesDetailContent(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF040C1A))
-            .padding(16.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            var isBackFocused by remember { mutableStateOf(false) }
-            IconButton(
-                onClick = onBack,
-                modifier = Modifier
-                    .onFocusChanged { isBackFocused = it.isFocused }
-                    .background(
-                        color = if (isBackFocused) Color(0xFFFFC107).copy(alpha = 0.3f) else Color.Transparent,
-                        shape = CircleShape
-                    )
-                    .border(
-                        border = if (isBackFocused) BorderStroke(2.dp, Color(0xFFFFC107)) else BorderStroke(0.dp, Color.Transparent),
-                        shape = CircleShape
-                    )
-            ) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Indietro", tint = Color.White)
-            }
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            Text(
-                text = series.title,
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f)
-            )
-
-            var isFavBtnFocused by remember { mutableStateOf(false) }
-            IconButton(
-                onClick = {
-                    watchPrefs.toggleSeriesFavorite(series.seriesId)
-                    isFavorite = watchPrefs.isSeriesFavorite(series.seriesId)
-                },
-                modifier = Modifier
-                    .onFocusChanged { isFavBtnFocused = it.isFocused }
-                    .background(if (isFavBtnFocused) Color(0xFFFFC107).copy(alpha = 0.3f) else Color.Transparent, CircleShape)
-                    .border(if (isFavBtnFocused) BorderStroke(2.dp, Color(0xFFFFC107)) else BorderStroke(0.dp, Color.Transparent), CircleShape)
-            ) {
-                Icon(
-                    imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                    contentDescription = "Preferito",
-                    tint = if (isFavorite) Color.Red else Color.White
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
+        TopHeaderBar(
+            selectedCategoryName = detailInfo?.name ?: series.title,
+            timezoneId = timezoneId,
+            onBack = onBack,
+            sortModeLabel = "",
+            onSortToggle = { },
+            onSearchToggle = { },
+            isSearchActive = false,
+            searchQuery = "",
+            onSearchQueryChange = { }
+        )
 
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = Color(0xFFFFC107))
             }
         } else {
-            Row(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Column(modifier = Modifier.width(220.dp)) {
                     Card(
                         shape = RoundedCornerShape(8.dp),
@@ -931,6 +967,40 @@ fun SeriesDetailContent(
                 Spacer(modifier = Modifier.width(16.dp))
 
                 Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = series.title,
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        var isFavBtnFocused by remember { mutableStateOf(false) }
+                        IconButton(
+                            onClick = {
+                                watchPrefs.toggleSeriesFavorite(series.seriesId)
+                                isFavorite = watchPrefs.isSeriesFavorite(series.seriesId)
+                            },
+                            modifier = Modifier
+                                .onFocusChanged { isFavBtnFocused = it.isFocused }
+                                .background(if (isFavBtnFocused) Color(0xFFFFC107).copy(alpha = 0.3f) else Color.Transparent, CircleShape)
+                                .border(if (isFavBtnFocused) BorderStroke(2.dp, Color(0xFFFFC107)) else BorderStroke(0.dp, Color.Transparent), CircleShape)
+                        ) {
+                            Icon(
+                                imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                contentDescription = "Preferito",
+                                tint = if (isFavorite) Color.Red else Color.White
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
                     Text(
                         text = detailInfo?.plot ?: "Nessuna trama disponibile",
                         color = Color.White,
@@ -945,7 +1015,7 @@ fun SeriesDetailContent(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(seasonsList) { season ->
+                        items(seasonsList, key = { it }) { season ->
                             val isSelected = season == selectedSeason
                             var isFocused by remember { mutableStateOf(false) }
                             Surface(
@@ -973,12 +1043,13 @@ fun SeriesDetailContent(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    val currentEpisodes = episodesMap[selectedSeason] ?: emptyList()
                     LazyColumn(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(260.dp)
                     ) {
-                        items(currentEpisodes) { ep ->
+                        items(currentEpisodes, key = { it.id }) { ep ->
                             var isFocused by remember { mutableStateOf(false) }
                             val savedPos = watchPrefs.getPosition(ep.id)
 
@@ -992,12 +1063,11 @@ fun SeriesDetailContent(
                                     .fillMaxWidth()
                                     .onFocusChanged { isFocused = it.isFocused }
                                     .clickable {
-                                        watchPrefs.saveSeriesEpisodeMapping(series.seriesId, ep.id)
-                                        if (savedPos > 0) {
+                                        if (savedPos > 10_000) {
                                             selectedEpisodeForPlayback = ep
                                             savedProgressMs = savedPos
                                         } else {
-                                            onEpisodeSelect(ep, 0L)
+                                            playEpisode(ep, 0L)
                                         }
                                     }
                             ) {

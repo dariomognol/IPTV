@@ -5,10 +5,14 @@ import android.os.Bundle
 import android.os.Process
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 
 enum class AppScreen {
@@ -49,6 +53,40 @@ class MainActivity : ComponentActivity() {
                     // --- STATO STREAM E RIPRESA VISIONE ---
                     var currentStreamUrl by remember { mutableStateOf("") }
                     var startPositionMs by remember { mutableLongStateOf(0L) }
+                    var nextEpisodeCallback by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+                    var showExitConfirmation by remember { mutableStateOf(false) }
+
+                    BackHandler(enabled = currentScreen == AppScreen.DASHBOARD) {
+                        showExitConfirmation = true
+                    }
+
+                    if (showExitConfirmation) {
+                        AlertDialog(
+                            onDismissRequest = { showExitConfirmation = false },
+                            title = { Text("Uscire dall'applicazione?", color = Color.White, fontWeight = FontWeight.Bold) },
+                            text = { Text("Sei sicuro di voler uscire da IPTV PRO?", color = Color.LightGray) },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        showExitConfirmation = false
+                                        finishAffinity()
+                                        Process.killProcess(Process.myPid())
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF4B4B)),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Esci", color = Color.White, fontWeight = FontWeight.Bold)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showExitConfirmation = false }) {
+                                    Text("Annulla", color = Color.White)
+                                }
+                            },
+                            containerColor = Color(0xFF161D2B)
+                        )
+                    }
 
                     if (currentAccount == null) {
                         LoginScreen(
@@ -101,8 +139,7 @@ class MainActivity : ComponentActivity() {
                                         Toast.makeText(this@MainActivity, "Lista canali e EPG aggiornati!", Toast.LENGTH_SHORT).show()
                                     },
                                     onExitApp = {
-                                        finishAffinity()
-                                        Process.killProcess(Process.myPid())
+                                        showExitConfirmation = true
                                     }
                                 )
                             }
@@ -116,6 +153,7 @@ class MainActivity : ComponentActivity() {
                                         currentScreen = AppScreen.DASHBOARD
                                     },
                                     onChannelSelect = { channel ->
+                                        nextEpisodeCallback = null
                                         currentAccount?.let { acc ->
                                             val ext = if (selectedStreamFormat.contains("TS")) "ts" else "m3u8"
                                             val baseUrl = acc.serverUrl.trimEnd('/')
@@ -147,6 +185,7 @@ class MainActivity : ComponentActivity() {
                                     timezoneId = selectedTimezoneId,
                                     onBack = { currentScreen = AppScreen.DASHBOARD },
                                     onMovieSelect = { movie, startPos ->
+                                        nextEpisodeCallback = null
                                         currentAccount?.let { acc ->
                                             val ext = movie.containerExtension ?: "mp4"
                                             val baseUrl = acc.serverUrl.trimEnd('/')
@@ -174,13 +213,14 @@ class MainActivity : ComponentActivity() {
                             }
 
                             AppScreen.SERIES -> {
-                                SeriesScreen(
+                                MainSeriesScreen(
                                     serverUrl = currentAccount?.serverUrl ?: "",
                                     username = currentAccount?.username ?: "",
                                     password = currentAccount?.password ?: "",
                                     timezoneId = selectedTimezoneId,
                                     onBack = { currentScreen = AppScreen.DASHBOARD },
-                                    onEpisodeSelect = { episode, startPos ->
+                                    onEpisodeSelect = { episode, startPos, onNextEp ->
+                                        nextEpisodeCallback = onNextEp
                                         currentAccount?.let { acc ->
                                             val ext = episode.containerExtension
                                             val baseUrl = acc.serverUrl.trimEnd('/')
@@ -211,6 +251,7 @@ class MainActivity : ComponentActivity() {
                                 PlayerScreen(
                                     videoUrl = currentStreamUrl,
                                     startPositionMs = startPositionMs,
+                                    onNextEpisode = nextEpisodeCallback,
                                     onBack = { currentScreen = previousScreen }
                                 )
                             }

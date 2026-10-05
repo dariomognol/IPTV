@@ -3,30 +3,45 @@ package com.example.iptv
 import android.app.Activity
 import android.os.Handler
 import android.os.Looper
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -49,10 +64,13 @@ import kotlinx.coroutines.delay
 fun PlayerScreen(
     videoUrl: String,
     startPositionMs: Long = 0L,
+    onNextEpisode: (() -> Unit)? = null,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
     val watchPrefs = remember { WatchPreferences(context) }
+    val focusManager = LocalFocusManager.current
+    val isLiveStream = videoUrl.contains("/live/")
 
     val streamId = remember(videoUrl) {
         videoUrl.substringAfterLast("/").substringBefore(".")
@@ -61,29 +79,40 @@ fun PlayerScreen(
     val reconnectHandler = remember { Handler(Looper.getMainLooper()) }
 
     val exoPlayer = remember(videoUrl) {
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .setAllowCrossProtocolRedirects(true)
-
-        val customLoadErrorHandlingPolicy = object : DefaultLoadErrorHandlingPolicy() {
-            override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long = 5000L
-            override fun getMinimumLoadableRetryCount(dataType: Int): Int = 10
-        }
-
-        val mediaSourceFactory = DefaultMediaSourceFactory(context)
-            .setDataSourceFactory(httpDataSourceFactory)
-            .setLoadErrorHandlingPolicy(customLoadErrorHandlingPolicy)
-
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .build().apply {
-                setMediaItem(MediaItem.fromUri(videoUrl))
-                prepare()
-                if (startPositionMs > 0) {
-                    seekTo(startPositionMs)
+        if (isLiveStream) {
+            LivePlayerHolder.getPlayer(context).apply {
+                val currentUri = currentMediaItem?.localConfiguration?.uri?.toString()
+                if (currentUri != videoUrl || !isPlaying) {
+                    setMediaItem(MediaItem.fromUri(videoUrl))
+                    prepare()
+                    play()
                 }
-                playWhenReady = true
             }
+        } else {
+            val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+                .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .setAllowCrossProtocolRedirects(true)
+
+            val customLoadErrorHandlingPolicy = object : DefaultLoadErrorHandlingPolicy() {
+                override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long = 5000L
+                override fun getMinimumLoadableRetryCount(dataType: Int): Int = 10
+            }
+
+            val mediaSourceFactory = DefaultMediaSourceFactory(context)
+                .setDataSourceFactory(httpDataSourceFactory)
+                .setLoadErrorHandlingPolicy(customLoadErrorHandlingPolicy)
+
+            ExoPlayer.Builder(context)
+                .setMediaSourceFactory(mediaSourceFactory)
+                .build().apply {
+                    setMediaItem(MediaItem.fromUri(videoUrl))
+                    prepare()
+                    if (startPositionMs > 0) {
+                        seekTo(startPositionMs)
+                    }
+                    playWhenReady = true
+                }
+        }
     }
 
     val reconnectRunnable = remember(exoPlayer) {
@@ -95,6 +124,8 @@ fun PlayerScreen(
 
     var isPlaying by remember { mutableStateOf(true) }
     var controlsVisible by remember { mutableStateOf(true) }
+
+    val playPauseFocusRequester = remember { FocusRequester() }
 
     // Stati per la gestione della barra di scorrimento (Seekbar)
     var currentPosition by remember { mutableLongStateOf(0L) }
@@ -135,6 +166,16 @@ fun PlayerScreen(
         }
     }
 
+    // Quando i controlli diventano visibili, assegna il focus al tasto Play/Pausa
+    LaunchedEffect(controlsVisible) {
+        if (controlsVisible) {
+            delay(100L)
+            try {
+                playPauseFocusRequester.requestFocus()
+            } catch (_: Exception) {}
+        }
+    }
+
     val activity = context as? Activity
     DisposableEffect(exoPlayer) {
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -153,14 +194,16 @@ fun PlayerScreen(
 
         onDispose {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            val currentPos = exoPlayer.currentPosition
-            val totalDur = exoPlayer.duration
-            if (streamId.isNotEmpty()) {
-                watchPrefs.savePosition(streamId, currentPos, totalDur)
+            if (!isLiveStream) {
+                val currentPos = exoPlayer.currentPosition
+                val totalDur = exoPlayer.duration
+                if (streamId.isNotEmpty()) {
+                    watchPrefs.savePosition(streamId, currentPos, totalDur)
+                }
+                exoPlayer.release()
             }
             reconnectHandler.removeCallbacks(reconnectRunnable)
             exoPlayer.removeListener(listener)
-            exoPlayer.release()
         }
     }
 
@@ -188,6 +231,9 @@ fun PlayerScreen(
                     useController = false
                 }
             },
+            update = { playerView ->
+                playerView.player = exoPlayer
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer(
@@ -196,81 +242,87 @@ fun PlayerScreen(
                 )
         )
 
-        // 2. Strato di tocco invisibile per riaprire la barra quando è chiusa
-        if (!controlsVisible) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() }
-                    ) {
-                        controlsVisible = true
-                    }
-            )
-        }
+        // 2. Overlay invisibile per intercettare i click e mostrare/nascondere i controlli
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {
+                    controlsVisible = !controlsVisible
+                }
+        )
 
-        // 3. BARRA SUPERIORE DEI CONTROLLI
+        // 3. Controlli Overlay
         AnimatedVisibility(
             visible = controlsVisible,
             enter = fadeIn(),
             exit = fadeOut(),
-            modifier = Modifier.align(Alignment.TopCenter)
+            modifier = Modifier.fillMaxSize()
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.7f))
-                    .padding(10.dp)
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.SpaceBetween
             ) {
+                // BARRA SUPERIORE CONTROLLI
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Tasto Indietro
-                    Button(
-                        onClick = onBack,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Indietro", tint = Color.White, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Indietro", color = Color.White, fontSize = 12.sp)
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Torna indietro",
+                            tint = Color.White
+                        )
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        // Tasto Play / Pause
-                        Button(
-                            onClick = {
-                                if (exoPlayer.isPlaying) {
-                                    exoPlayer.pause()
-                                } else {
-                                    exoPlayer.play()
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                contentDescription = "Play/Pause",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Pulsante Prossimo Episodio (Se disponibile)
+                        if (onNextEpisode != null) {
+                            var isNextFocused by remember { mutableStateOf(false) }
+                            Button(
+                                onClick = { onNextEpisode() },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isNextFocused) Color(0xFFFFC107) else Color(0x99333333)
+                                ),
+                                shape = RoundedCornerShape(6.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .height(32.dp)
+                                    .onFocusChanged { isNextFocused = it.isFocused }
+                                    .border(if (isNextFocused) BorderStroke(2.dp, Color.White) else BorderStroke(0.dp, Color.Transparent), RoundedCornerShape(6.dp))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SkipNext,
+                                    contentDescription = "Prossimo Episodio",
+                                    tint = if (isNextFocused) Color.Black else Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Episodio Succ.", color = if (isNextFocused) Color.Black else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
 
-                        // Tasto Modifica Size
+                        // Pulsante Formato / Proporzioni
                         Button(
                             onClick = {
                                 zoomModeIndex = (zoomModeIndex + 1) % zoomScaleFactors.size
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.AspectRatio, contentDescription = "Size", tint = Color.White, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(zoomScaleFactors[zoomModeIndex].first, color = Color.White, fontSize = 11.sp)
+                            Icon(imageVector = Icons.Default.AspectRatio, contentDescription = "Formato", tint = Color.White, modifier = Modifier.size(18.dp))
+                            Text(" ${currentScale.first}", color = Color.White, fontSize = 11.sp)
                         }
 
                         // Pulsante Tracce Audio
@@ -295,7 +347,8 @@ fun PlayerScreen(
                                     showAudioMenu = true
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
                             ) {
                                 Icon(imageVector = Icons.Default.Audiotrack, contentDescription = "Audio", tint = Color.White, modifier = Modifier.size(18.dp))
                                 Text(" Audio", color = Color.White, fontSize = 11.sp)
@@ -351,7 +404,8 @@ fun PlayerScreen(
                                     showVideoMenu = true
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
                             ) {
                                 Icon(imageVector = Icons.Default.Videocam, contentDescription = "Video", tint = Color.White, modifier = Modifier.size(18.dp))
                                 Text(" Video", color = Color.White, fontSize = 11.sp)
@@ -387,42 +441,158 @@ fun PlayerScreen(
                     }
                 }
 
-                // Se il video ha una durata valida (Film o Serie TV), mostra la barra di scorrimento
-                if (duration > 0) {
-                    Spacer(modifier = Modifier.height(6.dp))
+                // CONTROLLO CENTRALE PLAY / PAUSA
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    var isPlayPauseFocused by remember { mutableStateOf(false) }
+                    IconButton(
+                        onClick = {
+                            if (isPlaying) {
+                                exoPlayer.pause()
+                            } else {
+                                exoPlayer.play()
+                            }
+                        },
+                        modifier = Modifier
+                            .size(60.dp)
+                            .focusRequester(playPauseFocusRequester)
+                            .onFocusChanged { isPlayPauseFocused = it.isFocused }
+                            .background(if (isPlayPauseFocused) Color(0xFFFFC107) else Color(0x99000000), CircleShape)
+                            .border(if (isPlayPauseFocused) BorderStroke(3.dp, Color.White) else BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (isPlaying) "Pausa" else "Riproduci",
+                            tint = if (isPlayPauseFocused) Color.Black else Color.White,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                }
+
+                // Se non è Live TV (Film o Serie TV), mostra i pulsanti di salto e la barra di scorrimento
+                if (!isLiveStream) {
+                    Spacer(modifier = Modifier.height(4.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = formatMillis(currentPosition),
-                            color = Color.White,
-                            fontSize = 11.sp
-                        )
-                        Slider(
-                            value = sliderPosition,
-                            onValueChange = { newValue ->
-                                isSeeking = true
-                                sliderPosition = newValue
-                            },
-                            onValueChangeFinished = {
-                                val targetPosition = (sliderPosition * duration).toLong()
-                                exoPlayer.seekTo(targetPosition)
-                                isSeeking = false
-                            },
-                            modifier = Modifier.weight(1f),
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color.White,
-                                activeTrackColor = Color.Red,
-                                inactiveTrackColor = Color.Gray
+                        Button(
+                            onClick = { exoPlayer.seekTo((exoPlayer.currentPosition - 60000L).coerceAtLeast(0L)) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) { Text("-1m", color = Color.White, fontSize = 10.sp) }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Button(
+                            onClick = { exoPlayer.seekTo((exoPlayer.currentPosition - 30000L).coerceAtLeast(0L)) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) { Text("-30s", color = Color.White, fontSize = 10.sp) }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Button(
+                            onClick = { exoPlayer.seekTo((exoPlayer.currentPosition - 15000L).coerceAtLeast(0L)) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) { Text("-15s", color = Color.White, fontSize = 10.sp) }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Button(
+                            onClick = { exoPlayer.seekTo((exoPlayer.currentPosition + 15000L).coerceAtMost(duration)) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) { Text("+15s", color = Color.White, fontSize = 10.sp) }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Button(
+                            onClick = { exoPlayer.seekTo((exoPlayer.currentPosition + 30000L).coerceAtMost(duration)) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) { Text("+30s", color = Color.White, fontSize = 10.sp) }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Button(
+                            onClick = { exoPlayer.seekTo((exoPlayer.currentPosition + 60000L).coerceAtMost(duration)) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x99333333)),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) { Text("+1m", color = Color.White, fontSize = 10.sp) }
+                    }
+
+                    if (duration > 0) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = formatMillis(currentPosition),
+                                color = Color.White,
+                                fontSize = 11.sp
                             )
-                        )
-                        Text(
-                            text = formatMillis(duration),
-                            color = Color.White,
-                            fontSize = 11.sp
-                        )
+                            Slider(
+                                value = sliderPosition,
+                                onValueChange = { newValue ->
+                                    isSeeking = true
+                                    sliderPosition = newValue
+                                },
+                                onValueChangeFinished = {
+                                    val targetPosition = (sliderPosition * duration).toLong()
+                                    exoPlayer.seekTo(targetPosition)
+                                    isSeeking = false
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .onPreviewKeyEvent { keyEvent ->
+                                        if (keyEvent.type == KeyEventType.KeyDown) {
+                                            when (keyEvent.nativeKeyEvent.keyCode) {
+                                                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                                                    val newPos = (exoPlayer.currentPosition + 10000L).coerceAtMost(duration)
+                                                    exoPlayer.seekTo(newPos)
+                                                    true
+                                                }
+                                                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                                                    val newPos = (exoPlayer.currentPosition - 10000L).coerceAtLeast(0L)
+                                                    exoPlayer.seekTo(newPos)
+                                                    true
+                                                }
+                                                KeyEvent.KEYCODE_DPAD_UP -> {
+                                                    focusManager.moveFocus(FocusDirection.Up)
+                                                    true
+                                                }
+                                                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                                                    true
+                                                }
+                                                else -> false
+                                            }
+                                        } else if (keyEvent.type == KeyEventType.KeyUp) {
+                                            when (keyEvent.nativeKeyEvent.keyCode) {
+                                                KeyEvent.KEYCODE_DPAD_UP,
+                                                KeyEvent.KEYCODE_DPAD_DOWN,
+                                                KeyEvent.KEYCODE_DPAD_LEFT,
+                                                KeyEvent.KEYCODE_DPAD_RIGHT -> true
+                                                else -> false
+                                            }
+                                        } else false
+                                    },
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color.White,
+                                    activeTrackColor = Color.Red,
+                                    inactiveTrackColor = Color.Gray
+                                )
+                            )
+                            Text(
+                                text = formatMillis(duration),
+                                color = Color.White,
+                                fontSize = 11.sp
+                            )
+                        }
                     }
                 }
             }

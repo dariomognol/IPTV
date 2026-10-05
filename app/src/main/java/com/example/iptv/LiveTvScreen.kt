@@ -298,7 +298,7 @@ fun LiveTvScreen(
                         contentPadding = PaddingValues(10.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        items(categories) { category ->
+                        items(categories, key = { it.categoryId }) { category ->
                             val isSelected = category.categoryId == selectedCategoryId
                             LiveCategorySidebarItem(
                                 category = category,
@@ -350,7 +350,7 @@ fun LiveTvScreen(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(displayedChannels) { channel ->
+                        items(displayedChannels, key = { it.streamId }) { channel ->
                             val isSelected = channel.streamId == selectedChannel?.streamId
                             val isFav = favoriteIds.contains(channel.streamId)
 
@@ -483,7 +483,7 @@ fun LiveTvScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                items(epgList) { prog ->
+                                items(epgList, key = { it.start + it.title }) { prog ->
                                     Surface(
                                         shape = RoundedCornerShape(6.dp),
                                         color = Color(0xFF132A4D),

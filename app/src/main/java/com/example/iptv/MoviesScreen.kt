@@ -11,8 +11,10 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -56,6 +58,7 @@ data class MovieItem(
     val categoryId: String,
     val coverUrl: String? = null,
     val releaseDate: String? = null,
+    val addedDate: String? = null,
     val containerExtension: String? = "mp4"
 )
 
@@ -172,14 +175,18 @@ fun MoviesScreen(
                     val movieList = mutableListOf<MovieItem>()
                     for (i in 0 until jsonArr.length()) {
                         val obj = jsonArr.getJSONObject(i)
-                        val icon = obj.optString("stream_icon").ifEmpty { obj.optString("cover") }
+                        val rawIcon = obj.optString("stream_icon").ifEmpty { obj.optString("cover") }
+                        val fullIcon = getAbsoluteImageUrl(serverUrl, rawIcon)
+                        val addedStr = obj.optString("added").ifEmpty { obj.optString("release_date") }
+
                         movieList.add(
                             MovieItem(
                                 streamId = obj.optString("stream_id"),
                                 title = obj.optString("name", "Senza Titolo"),
                                 categoryId = obj.optString("category_id"),
-                                coverUrl = icon.ifEmpty { null },
-                                releaseDate = obj.optString("added", obj.optString("release_date")),
+                                coverUrl = fullIcon,
+                                releaseDate = obj.optString("release_date", obj.optString("added")),
+                                addedDate = addedStr,
                                 containerExtension = obj.optString("container_extension", "mp4")
                             )
                         )
@@ -241,7 +248,7 @@ fun MoviesScreen(
                 .let { list ->
                     if (selectedCategoryId == "RECENT") {
                         list.sortedWith(
-                            compareByDescending<MovieItem> { it.releaseDate ?: "" }
+                            compareByDescending<MovieItem> { parseAddedTimestamp(it.addedDate) }
                                 .thenByDescending { it.streamId.toLongOrNull() ?: 0L }
                         )
                     } else {
@@ -249,7 +256,7 @@ fun MoviesScreen(
                             MovieSortMode.ALPHA_ASC -> list.sortedBy { m -> m.title.lowercase(Locale.getDefault()) }
                             MovieSortMode.ALPHA_DESC -> list.sortedByDescending { m -> m.title.lowercase(Locale.getDefault()) }
                             MovieSortMode.NEWEST -> list.sortedWith(
-                                compareByDescending<MovieItem> { it.releaseDate ?: "" }
+                                compareByDescending<MovieItem> { parseAddedTimestamp(it.addedDate) }
                                     .thenByDescending { it.streamId.toLongOrNull() ?: 0L }
                             )
                         }
@@ -301,7 +308,7 @@ fun MoviesScreen(
                             contentPadding = PaddingValues(12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            items(categories) { cat ->
+                            items(categories, key = { it.categoryId }) { cat ->
                                 val isSelected = cat.categoryId == selectedCategoryId
                                 MovieCategorySidebarItem(
                                     category = cat,
@@ -352,7 +359,7 @@ fun MoviesScreen(
                             contentPadding = PaddingValues(bottom = 16.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(filteredMovies) { movie ->
+                            items(filteredMovies, key = { it.streamId }) { movie ->
                                 val isFav = favoriteIds.contains(movie.streamId)
                                 val pos = watchPrefs.getPosition(movie.streamId)
                                 val dur = watchPrefs.getDuration(movie.streamId)
@@ -411,10 +418,13 @@ fun MovieDetailContent(
                     val infoObj = jsonObj.optJSONObject("info")
                     val movieDataObj = jsonObj.optJSONObject("movie_data")
 
+                    val rawCover = infoObj?.optString("cover_big", infoObj.optString("movie_image", movie.coverUrl ?: "")) ?: movie.coverUrl
+                    val fullCover = getAbsoluteImageUrl(serverUrl, rawCover)
+
                     detailInfo = MovieDetailInfo(
                         streamId = movie.streamId,
                         name = infoObj?.optString("name", movie.title) ?: movie.title,
-                        cover = infoObj?.optString("cover_big", infoObj.optString("movie_image", movie.coverUrl ?: "")) ?: movie.coverUrl,
+                        cover = fullCover,
                         plot = infoObj?.optString("plot", "Nessuna trama disponibile."),
                         director = infoObj?.optString("director", "-"),
                         cast = infoObj?.optString("cast", "-"),
@@ -514,6 +524,7 @@ fun MovieDetailContent(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(24.dp)
+                    .verticalScroll(rememberScrollState())
             ) {
                 Column(modifier = Modifier.width(260.dp)) {
                     Card(
