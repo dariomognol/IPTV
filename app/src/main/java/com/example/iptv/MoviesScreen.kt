@@ -9,8 +9,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +23,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -36,13 +40,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+
+object MoviesScrollStateHolder {
+    var index: Int = 0
+    var offset: Int = 0
+}
 
 enum class MovieSortMode(val label: String) {
     ALPHA_ASC("A-Z"),
@@ -80,17 +88,31 @@ data class MovieDetailInfo(
 fun MoviesScreen(
     account: Any?,
     timezoneId: String = "Europe/Rome",
+    initialSelectedMovie: MovieItem? = null,
+    onDetailMovieChange: ((MovieItem?) -> Unit)? = null,
     onBack: () -> Unit,
     onMovieSelect: (MovieItem, startPositionMs: Long) -> Unit
 ) {
-    BackHandler { onBack() }
-
     val context = LocalContext.current
     val watchPrefs = remember { WatchPreferences(context) }
+    val moviesGridState = rememberLazyGridState(
+        initialFirstVisibleItemIndex = MoviesScrollStateHolder.index,
+        initialFirstVisibleItemScrollOffset = MoviesScrollStateHolder.offset
+    )
+
+    LaunchedEffect(moviesGridState) {
+        snapshotFlow { Pair(moviesGridState.firstVisibleItemIndex, moviesGridState.firstVisibleItemScrollOffset) }
+            .collect { (idx, off) ->
+                MoviesScrollStateHolder.index = idx
+                MoviesScrollStateHolder.offset = off
+            }
+    }
+
+    val initialGridFocusRequester = remember { FocusRequester() }
 
     var categories by remember { mutableStateOf<List<CategoryItem>>(emptyList()) }
     var moviesList by remember { mutableStateOf<List<MovieItem>>(emptyList()) }
-    var selectedMovieForDetail by remember { mutableStateOf<MovieItem?>(null) }
+    var selectedMovieForDetail by remember { mutableStateOf<MovieItem?>(initialSelectedMovie) }
 
     var selectedCategoryId by remember { mutableStateOf("ALL") }
     var searchQuery by remember { mutableStateOf("") }
@@ -124,6 +146,31 @@ fun MoviesScreen(
     val cacheManager = remember { IptvCacheManager(context) }
     val shouldRefresh = remember { cacheManager.shouldRefresh(context, accountKey) }
 
+    BackHandler {
+        if (selectedMovieForDetail != null) {
+            selectedMovieForDetail = null
+            onDetailMovieChange?.invoke(null)
+        } else {
+            onBack()
+        }
+    }
+
+    LaunchedEffect(selectedMovieForDetail) {
+        onDetailMovieChange?.invoke(selectedMovieForDetail)
+    }
+
+    // Reset dello scroll della griglia ad ogni cambio INTERATTIVO di ordinamento o categoria
+    var isInitialSortLaunch by remember { mutableStateOf(true) }
+    LaunchedEffect(sortMode, selectedCategoryId) {
+        if (isInitialSortLaunch) {
+            isInitialSortLaunch = false
+        } else {
+            try {
+                moviesGridState.scrollToItem(0)
+            } catch (_: Exception) {}
+        }
+    }
+
     // Scarica Categorie e Film
     LaunchedEffect(account) {
         if (serverUrl.isEmpty() || username.isEmpty() || password.isEmpty()) {
@@ -147,60 +194,141 @@ fun MoviesScreen(
 
         withContext(Dispatchers.IO) {
             try {
+                val catList = mutableListOf<CategoryItem>()
+                catList.add(CategoryItem("ALL", "TUTTI I FILM"))
+                catList.add(CategoryItem("FAVORITES", "PREFERITI"))
+                catList.add(CategoryItem("CONTINUE", "CONTINUA A GUARDARE"))
+                catList.add(CategoryItem("RECENT", "AGGIUNTI DI RECENTE"))
+
                 // 1. Categorie Film
                 val catUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_vod_categories"
                 val connCat = URL(catUrl).openConnection() as HttpURLConnection
+                connCat.connectTimeout = 10000
+                connCat.readTimeout = 10000
                 if (connCat.responseCode == 200) {
-                    val res = connCat.inputStream.bufferedReader().use { it.readText() }
-                    val jsonArr = JSONArray(res)
-                    val catList = mutableListOf<CategoryItem>()
-                    catList.add(CategoryItem("ALL", "TUTTI I FILM"))
-                    catList.add(CategoryItem("FAVORITES", "PREFERITI"))
-                    catList.add(CategoryItem("CONTINUE", "CONTINUA A GUARDARE"))
-                    catList.add(CategoryItem("RECENT", "AGGIUNTI DI RECENTE"))
-
-                    for (i in 0 until jsonArr.length()) {
-                        val obj = jsonArr.getJSONObject(i)
-                        catList.add(CategoryItem(obj.getString("category_id"), obj.getString("category_name")))
+                    val res = connCat.inputStream.bufferedReader().use { it.readText() }.trim()
+                    if (res.startsWith("[")) {
+                        val jsonArr = JSONArray(res)
+                        for (i in 0 until jsonArr.length()) {
+                            val obj = jsonArr.getJSONObject(i)
+                            catList.add(CategoryItem(obj.optString("category_id"), obj.optString("category_name")))
+                        }
                     }
+                }
+
+                withContext(Dispatchers.Main) {
                     categories = catList
                 }
 
                 // 2. Film VOD
                 val vodUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_vod_streams"
                 val connVod = URL(vodUrl).openConnection() as HttpURLConnection
+                connVod.connectTimeout = 15000
+                connVod.readTimeout = 15000
                 if (connVod.responseCode == 200) {
-                    val res = connVod.inputStream.bufferedReader().use { it.readText() }
-                    val jsonArr = JSONArray(res)
+                    val res = connVod.inputStream.bufferedReader().use { it.readText() }.trim()
                     val movieList = mutableListOf<MovieItem>()
-                    for (i in 0 until jsonArr.length()) {
-                        val obj = jsonArr.getJSONObject(i)
-                        val rawIcon = obj.optString("stream_icon").ifEmpty { obj.optString("cover") }
-                        val fullIcon = getAbsoluteImageUrl(serverUrl, rawIcon)
-                        val addedStr = obj.optString("added").ifEmpty { obj.optString("release_date") }
 
-                        movieList.add(
-                            MovieItem(
-                                streamId = obj.optString("stream_id"),
-                                title = obj.optString("name", "Senza Titolo"),
-                                categoryId = obj.optString("category_id"),
-                                coverUrl = fullIcon,
-                                releaseDate = obj.optString("release_date", obj.optString("added")),
-                                addedDate = addedStr,
-                                containerExtension = obj.optString("container_extension", "mp4")
+                    if (res.startsWith("[")) {
+                        val jsonArr = JSONArray(res)
+                        for (i in 0 until jsonArr.length()) {
+                            val obj = jsonArr.getJSONObject(i)
+                            val rawIcon = obj.optString("stream_icon").ifEmpty { obj.optString("cover") }
+                            val fullIcon = getAbsoluteImageUrl(serverUrl, rawIcon)
+                            val addedStr = obj.optString("added").ifEmpty { obj.optString("release_date") }
+
+                            movieList.add(
+                                MovieItem(
+                                    streamId = obj.optString("stream_id"),
+                                    title = obj.optString("name", "Senza Titolo"),
+                                    categoryId = obj.optString("category_id"),
+                                    coverUrl = fullIcon,
+                                    releaseDate = obj.optString("release_date", obj.optString("added")),
+                                    addedDate = addedStr,
+                                    containerExtension = obj.optString("container_extension", "mp4")
+                                )
                             )
-                        )
+                        }
                     }
-                    moviesList = movieList
-                    cacheManager.saveMoviesCache(accountKey, categories, movieList)
+
+                    cacheManager.saveMoviesCache(accountKey, catList, movieList)
+                    withContext(Dispatchers.Main) {
+                        moviesList = movieList
+                    }
                 } else {
-                    errorMessage = "Errore caricamento film HTTP ${connVod.responseCode}"
+                    withContext(Dispatchers.Main) {
+                        errorMessage = "Errore caricamento film HTTP ${connVod.responseCode}"
+                    }
                 }
-            } catch (e: Exception) {
-                errorMessage = "Impossibile collegarsi al server: ${e.localizedMessage}"
+            } catch (e: Throwable) {
+                withContext(Dispatchers.Main) {
+                    errorMessage = "Impossibile caricare i film: ${e.localizedMessage ?: "Errore di connessione"}"
+                }
             } finally {
-                isLoading = false
+                withContext(Dispatchers.Main) {
+                    isLoading = false
+                }
             }
+        }
+    }
+
+    val selectedCategoryName = remember(selectedCategoryId, categories) {
+        when (selectedCategoryId) {
+            "CONTINUE" -> "CONTINUA A GUARDARE"
+            "FAVORITES" -> "PREFERITI"
+            "RECENT" -> "AGGIUNTI DI RECENTE"
+            "ALL" -> "TUTTI I FILM"
+            else -> categories.find { it.categoryId == selectedCategoryId }?.categoryName?.uppercase() ?: "FILM"
+        }
+    }
+
+    val filteredMovies = remember(moviesList, selectedCategoryId, searchQuery, favoriteIds, sortMode) {
+        val continueWatchingIds = watchPrefs.getContinueWatchingIds()
+
+        moviesList
+            .filter { movie ->
+                val matchesCategory = when (selectedCategoryId) {
+                    "ALL" -> true
+                    "CONTINUE" -> continueWatchingIds.contains(movie.streamId)
+                    "FAVORITES" -> favoriteIds.contains(movie.streamId)
+                    "RECENT" -> true
+                    else -> movie.categoryId == selectedCategoryId
+                }
+                val titleStr = movie.title ?: ""
+                val matchesSearch = searchQuery.isBlank() || titleStr.contains(searchQuery, ignoreCase = true)
+                matchesCategory && matchesSearch
+            }
+            .let { list ->
+                if (selectedCategoryId == "RECENT") {
+                    list.sortedByDescending { m ->
+                        val t = parseAddedTimestamp(m.addedDate)
+                        val id = (m.streamId ?: "").toLongOrNull() ?: 0L
+                        if (t > 0L) t else id
+                    }
+                } else {
+                    when (sortMode) {
+                        MovieSortMode.ALPHA_ASC -> list.sortedBy { m -> (m.title ?: "").lowercase(Locale.getDefault()) }
+                        MovieSortMode.ALPHA_DESC -> list.sortedByDescending { m -> (m.title ?: "").lowercase(Locale.getDefault()) }
+                        MovieSortMode.NEWEST -> list.sortedByDescending { m ->
+                            val t = parseAddedTimestamp(m.addedDate)
+                            val id = (m.streamId ?: "").toLongOrNull() ?: 0L
+                            if (t > 0L) t else id
+                        }
+                    }
+                }
+            }
+    }
+
+    // Auto-focus sul primo film all'apertura dello schermo o ripristino posizione di scorrimento al ritorno dal dettaglio
+    LaunchedEffect(isLoading, filteredMovies.size, selectedMovieForDetail) {
+        if (!isLoading && filteredMovies.isNotEmpty() && selectedMovieForDetail == null) {
+            delay(150L)
+            try {
+                if (MoviesScrollStateHolder.index > 0) {
+                    moviesGridState.scrollToItem(MoviesScrollStateHolder.index, MoviesScrollStateHolder.offset)
+                }
+                initialGridFocusRequester.requestFocus()
+            } catch (_: Exception) {}
         }
     }
 
@@ -213,57 +341,12 @@ fun MoviesScreen(
             timezoneId = timezoneId,
             onBack = {
                 selectedMovieForDetail = null
+                onDetailMovieChange?.invoke(null)
                 favoriteIds = watchPrefs.getFavorites()
             },
             onMoviePlay = onMovieSelect
         )
     } else {
-        // Nome Categoria Selezionata
-        val selectedCategoryName = remember(selectedCategoryId, categories) {
-            when (selectedCategoryId) {
-                "CONTINUE" -> "CONTINUA A GUARDARE"
-                "FAVORITES" -> "PREFERITI"
-                "RECENT" -> "AGGIUNTI DI RECENTE"
-                "ALL" -> "TUTTI I FILM"
-                else -> categories.find { it.categoryId == selectedCategoryId }?.categoryName?.uppercase() ?: "FILM"
-            }
-        }
-
-        // Filtraggio Film
-        val filteredMovies = remember(moviesList, selectedCategoryId, searchQuery, favoriteIds, sortMode) {
-            val continueWatchingIds = watchPrefs.getContinueWatchingIds()
-
-            moviesList
-                .filter { movie ->
-                    val matchesCategory = when (selectedCategoryId) {
-                        "ALL" -> true
-                        "CONTINUE" -> continueWatchingIds.contains(movie.streamId)
-                        "FAVORITES" -> favoriteIds.contains(movie.streamId)
-                        "RECENT" -> true
-                        else -> movie.categoryId == selectedCategoryId
-                    }
-                    val matchesSearch = searchQuery.isBlank() || movie.title.contains(searchQuery, ignoreCase = true)
-                    matchesCategory && matchesSearch
-                }
-                .let { list ->
-                    if (selectedCategoryId == "RECENT") {
-                        list.sortedWith(
-                            compareByDescending<MovieItem> { parseAddedTimestamp(it.addedDate) }
-                                .thenByDescending { it.streamId.toLongOrNull() ?: 0L }
-                        )
-                    } else {
-                        when (sortMode) {
-                            MovieSortMode.ALPHA_ASC -> list.sortedBy { m -> m.title.lowercase(Locale.getDefault()) }
-                            MovieSortMode.ALPHA_DESC -> list.sortedByDescending { m -> m.title.lowercase(Locale.getDefault()) }
-                            MovieSortMode.NEWEST -> list.sortedWith(
-                                compareByDescending<MovieItem> { parseAddedTimestamp(it.addedDate) }
-                                    .thenByDescending { it.streamId.toLongOrNull() ?: 0L }
-                            )
-                        }
-                    }
-                }
-        }
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -308,7 +391,7 @@ fun MoviesScreen(
                             contentPadding = PaddingValues(12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            items(categories, key = { it.categoryId }) { cat ->
+                            itemsIndexed(categories, key = { idx, cat -> "${cat.categoryId}_$idx" }) { _, cat ->
                                 val isSelected = cat.categoryId == selectedCategoryId
                                 MovieCategorySidebarItem(
                                     category = cat,
@@ -353,13 +436,15 @@ fun MoviesScreen(
                         )
                     } else {
                         LazyVerticalGrid(
+                            state = moviesGridState,
                             columns = GridCells.Fixed(5),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                             contentPadding = PaddingValues(bottom = 16.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(filteredMovies, key = { it.streamId }) { movie ->
+                            itemsIndexed(filteredMovies, key = { idx, movie -> "${movie.streamId}_$idx" }) { idx, movie ->
+                                val isFirstItem = idx == 0
                                 val isFav = favoriteIds.contains(movie.streamId)
                                 val pos = watchPrefs.getPosition(movie.streamId)
                                 val dur = watchPrefs.getDuration(movie.streamId)
@@ -373,7 +458,11 @@ fun MoviesScreen(
                                         watchPrefs.toggleFavorite(movie.streamId)
                                         favoriteIds = watchPrefs.getFavorites()
                                     },
-                                    onClick = { selectedMovieForDetail = movie }
+                                    onClick = {
+                                        selectedMovieForDetail = movie
+                                        onDetailMovieChange?.invoke(movie)
+                                    },
+                                    modifier = if (isFirstItem) Modifier.focusRequester(initialGridFocusRequester) else Modifier
                                 )
                             }
                         }
@@ -403,6 +492,18 @@ fun MovieDetailContent(
     var detailInfo by remember { mutableStateOf<MovieDetailInfo?>(null) }
     var isLoading by remember { mutableStateOf(true) }
 
+    val detailFocusRequester = remember { FocusRequester() }
+
+    // Assegna il focus al tasto Indietro della schermata di dettaglio appena i dati terminano il caricamento
+    LaunchedEffect(isLoading) {
+        if (!isLoading) {
+            delay(150L)
+            try {
+                detailFocusRequester.requestFocus()
+            } catch (_: Exception) {}
+        }
+    }
+
     // Dialog per ripresa visione
     var showResumeDialog by remember { mutableStateOf(false) }
     var savedProgressMs by remember { mutableLongStateOf(0L) }
@@ -412,31 +513,38 @@ fun MovieDetailContent(
             try {
                 val url = "$serverUrl/player_api.php?username=$username&password=$password&action=get_vod_info&vod_id=${movie.streamId}"
                 val conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 10000
+                conn.readTimeout = 10000
                 if (conn.responseCode == 200) {
-                    val res = conn.inputStream.bufferedReader().use { it.readText() }
-                    val jsonObj = JSONObject(res)
-                    val infoObj = jsonObj.optJSONObject("info")
-                    val movieDataObj = jsonObj.optJSONObject("movie_data")
+                    val res = conn.inputStream.bufferedReader().use { it.readText() }.trim()
+                    if (res.startsWith("{")) {
+                        val jsonObj = org.json.JSONObject(res)
+                        val infoObj = jsonObj.optJSONObject("info")
+                        val movieDataObj = jsonObj.optJSONObject("movie_data")
 
-                    val rawCover = infoObj?.optString("cover_big", infoObj.optString("movie_image", movie.coverUrl ?: "")) ?: movie.coverUrl
-                    val fullCover = getAbsoluteImageUrl(serverUrl, rawCover)
+                        val rawCover = infoObj?.optString("cover_big", infoObj.optString("movie_image", movie.coverUrl ?: "")) ?: movie.coverUrl
+                        val fullCover = getAbsoluteImageUrl(serverUrl, rawCover)
 
-                    detailInfo = MovieDetailInfo(
-                        streamId = movie.streamId,
-                        name = infoObj?.optString("name", movie.title) ?: movie.title,
-                        cover = fullCover,
-                        plot = infoObj?.optString("plot", "Nessuna trama disponibile."),
-                        director = infoObj?.optString("director", "-"),
-                        cast = infoObj?.optString("cast", "-"),
-                        genre = infoObj?.optString("genre", "-"),
-                        releaseDate = infoObj?.optString("releasedate", movie.releaseDate ?: ""),
-                        rating = infoObj?.optString("rating", "0"),
-                        duration = infoObj?.optString("duration", ""),
-                        containerExtension = movieDataObj?.optString("container_extension", movie.containerExtension ?: "mp4") ?: "mp4"
-                    )
+                        val info = MovieDetailInfo(
+                            streamId = movie.streamId,
+                            name = infoObj?.optString("name", movie.title) ?: movie.title,
+                            cover = fullCover,
+                            plot = infoObj?.optString("plot", "Nessuna trama disponibile."),
+                            director = infoObj?.optString("director", "-"),
+                            cast = infoObj?.optString("cast", "-"),
+                            genre = infoObj?.optString("genre", "-"),
+                            releaseDate = infoObj?.optString("releasedate", movie.releaseDate ?: ""),
+                            rating = infoObj?.optString("rating", "0"),
+                            duration = infoObj?.optString("duration", ""),
+                            containerExtension = movieDataObj?.optString("container_extension", movie.containerExtension ?: "mp4") ?: "mp4"
+                        )
+                        withContext(Dispatchers.Main) {
+                            detailInfo = info
+                        }
+                    }
                 }
-            } catch (_: Exception) {
-                detailInfo = MovieDetailInfo(
+            } catch (_: Throwable) {
+                val fallback = MovieDetailInfo(
                     streamId = movie.streamId,
                     name = movie.title,
                     cover = movie.coverUrl,
@@ -449,8 +557,13 @@ fun MovieDetailContent(
                     duration = "",
                     containerExtension = movie.containerExtension ?: "mp4"
                 )
+                withContext(Dispatchers.Main) {
+                    detailInfo = fallback
+                }
             } finally {
-                isLoading = false
+                withContext(Dispatchers.Main) {
+                    isLoading = false
+                }
             }
         }
     }
@@ -512,7 +625,8 @@ fun MovieDetailContent(
             onSearchToggle = { },
             isSearchActive = false,
             searchQuery = "",
-            onSearchQueryChange = { }
+            onSearchQueryChange = { },
+            focusRequester = detailFocusRequester
         )
 
         if (isLoading) {
@@ -676,7 +790,8 @@ fun MovieTopHeaderBar(
     onSearchToggle: () -> Unit,
     isSearchActive: Boolean,
     searchQuery: String,
-    onSearchQueryChange: (String) -> Unit
+    onSearchQueryChange: (String) -> Unit,
+    focusRequester: FocusRequester? = null
 ) {
     var currentTime by remember { mutableStateOf("") }
     var currentDate by remember { mutableStateOf("") }
@@ -708,6 +823,7 @@ fun MovieTopHeaderBar(
             onClick = onBack,
             modifier = Modifier
                 .size(36.dp)
+                .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .onFocusChanged { isBackFocused = it.isFocused }
                 .background(
                     color = if (isBackFocused) Color(0xFFFFC107).copy(alpha = 0.3f) else Color.Transparent,
@@ -930,13 +1046,14 @@ fun MovieCardItem(
     posMs: Long,
     durMs: Long,
     onToggleFavorite: () -> Unit,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var isFocused by remember { mutableStateOf(false) }
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .onFocusChanged { isFocused = it.isFocused }
             .clickable { onClick() }

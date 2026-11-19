@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -22,6 +23,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -73,6 +77,11 @@ fun getAbsoluteImageUrl(serverUrl: String, iconUrl: String?): String? {
     return "$cleanBase/$cleanPath"
 }
 
+object SeriesScrollStateHolder {
+    var index: Int = 0
+    var offset: Int = 0
+}
+
 enum class SeriesSortMode(val label: String) {
     ALPHA_ASC("A-Z"),
     ALPHA_DESC("Z-A"),
@@ -119,6 +128,8 @@ fun MainSeriesScreen(
     username: String,
     password: String,
     timezoneId: String = "Europe/Rome",
+    initialSelectedSeries: SeriesData? = null,
+    onDetailSeriesChange: ((SeriesData?) -> Unit)? = null,
     onBack: () -> Unit,
     onEpisodeSelect: (SeriesEpisode, startPositionMs: Long, onNextEp: (() -> Unit)?) -> Unit
 ) {
@@ -127,6 +138,8 @@ fun MainSeriesScreen(
         username = username,
         password = password,
         timezoneId = timezoneId,
+        initialSelectedSeries = initialSelectedSeries,
+        onDetailSeriesChange = onDetailSeriesChange,
         onBack = onBack,
         onEpisodeSelect = onEpisodeSelect
     )
@@ -138,18 +151,18 @@ fun SeriesScreen(
     username: String,
     password: String,
     timezoneId: String = "Europe/Rome",
+    initialSelectedSeries: SeriesData? = null,
+    onDetailSeriesChange: ((SeriesData?) -> Unit)? = null,
     onBack: () -> Unit,
     onEpisodeSelect: (SeriesEpisode, startPositionMs: Long, onNextEp: (() -> Unit)?) -> Unit
 ) {
-    BackHandler { onBack() }
-
     val context = LocalContext.current
     val watchPrefs = remember { WatchPreferences(context) }
 
     var categories by remember { mutableStateOf<List<SeriesCategory>>(emptyList()) }
     var selectedCategory by remember { mutableStateOf<SeriesCategory?>(null) }
     var seriesList by remember { mutableStateOf<List<SeriesData>>(emptyList()) }
-    var selectedSeriesForDetail by remember { mutableStateOf<SeriesData?>(null) }
+    var selectedSeriesForDetail by remember { mutableStateOf<SeriesData?>(initialSelectedSeries) }
     var favoriteIds by remember { mutableStateOf(watchPrefs.getSeriesFavorites()) }
 
     var isLoadingCategories by remember { mutableStateOf(true) }
@@ -157,10 +170,37 @@ fun SeriesScreen(
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
     var sortMode by remember { mutableStateOf(SeriesSortMode.ALPHA_ASC) }
+    val seriesGridState = rememberLazyGridState(
+        initialFirstVisibleItemIndex = SeriesScrollStateHolder.index,
+        initialFirstVisibleItemScrollOffset = SeriesScrollStateHolder.offset
+    )
+
+    LaunchedEffect(seriesGridState) {
+        snapshotFlow { Pair(seriesGridState.firstVisibleItemIndex, seriesGridState.firstVisibleItemScrollOffset) }
+            .collect { (idx, off) ->
+                SeriesScrollStateHolder.index = idx
+                SeriesScrollStateHolder.offset = off
+            }
+    }
+
+    val initialGridFocusRequester = remember { FocusRequester() }
 
     val accountKey = remember(serverUrl, username) { "${serverUrl}_$username" }
     val cacheManager = remember { IptvCacheManager(context) }
     val shouldRefresh = remember { cacheManager.shouldRefresh(context, accountKey) }
+
+    BackHandler {
+        if (selectedSeriesForDetail != null) {
+            selectedSeriesForDetail = null
+            onDetailSeriesChange?.invoke(null)
+        } else {
+            onBack()
+        }
+    }
+
+    LaunchedEffect(selectedSeriesForDetail) {
+        onDetailSeriesChange?.invoke(selectedSeriesForDetail)
+    }
 
     // Caricamento Categorie e Serie
     LaunchedEffect(Unit) {
@@ -247,6 +287,65 @@ fun SeriesScreen(
         }
     }
 
+    val continueSeriesIds = remember(filteredSeriesByCategory, selectedCategory) {
+        watchPrefs.getContinueWatchingSeriesIds()
+    }
+
+    val filteredList = filteredSeriesByCategory
+        .filter { series ->
+            val matchesCategory = when (selectedCategory?.id) {
+                "FAVORITES" -> favoriteIds.contains(series.seriesId)
+                "CONTINUE" -> continueSeriesIds.contains(series.seriesId)
+                else -> true
+            }
+            val matchesSearch = searchQuery.isBlank() || series.title.contains(searchQuery, ignoreCase = true)
+            matchesCategory && matchesSearch
+        }
+        .let { list ->
+            if (selectedCategory?.id == "RECENT") {
+                list.sortedByDescending { s ->
+                    val t = parseAddedTimestamp(s.lastModified)
+                    val id = s.seriesId.toLongOrNull() ?: 0L
+                    if (t > 0L) t else id
+                }
+            } else {
+                when (sortMode) {
+                    SeriesSortMode.ALPHA_ASC -> list.sortedBy { s -> s.title.lowercase(Locale.getDefault()) }
+                    SeriesSortMode.ALPHA_DESC -> list.sortedByDescending { s -> s.title.lowercase(Locale.getDefault()) }
+                    SeriesSortMode.NEWEST -> list.sortedByDescending { s ->
+                        val t = parseAddedTimestamp(s.lastModified)
+                        val id = s.seriesId.toLongOrNull() ?: 0L
+                        if (t > 0L) t else id
+                    }
+                }
+            }
+        }
+
+    // Reset dello scroll della griglia ad ogni cambio INTERATTIVO di ordinamento o categoria
+    var isInitialSortLaunch by remember { mutableStateOf(true) }
+    LaunchedEffect(sortMode, selectedCategory) {
+        if (isInitialSortLaunch) {
+            isInitialSortLaunch = false
+        } else {
+            try {
+                seriesGridState.scrollToItem(0)
+            } catch (_: Exception) {}
+        }
+    }
+
+    // Auto-focus sulla prima serie TV all'apertura dello schermo o ripristino posizione di scorrimento al ritorno dal dettaglio
+    LaunchedEffect(isLoadingSeries, filteredList.size, selectedSeriesForDetail) {
+        if (!isLoadingSeries && filteredList.isNotEmpty() && selectedSeriesForDetail == null) {
+            delay(150L)
+            try {
+                if (SeriesScrollStateHolder.index > 0) {
+                    seriesGridState.scrollToItem(SeriesScrollStateHolder.index, SeriesScrollStateHolder.offset)
+                }
+                initialGridFocusRequester.requestFocus()
+            } catch (_: Exception) {}
+        }
+    }
+
     if (selectedSeriesForDetail != null) {
         SeriesDetailContent(
             series = selectedSeriesForDetail!!,
@@ -256,43 +355,12 @@ fun SeriesScreen(
             timezoneId = timezoneId,
             onBack = {
                 selectedSeriesForDetail = null
+                onDetailSeriesChange?.invoke(null)
                 favoriteIds = watchPrefs.getSeriesFavorites()
             },
             onEpisodeSelect = onEpisodeSelect
         )
     } else {
-        val continueSeriesIds = remember(filteredSeriesByCategory, selectedCategory) {
-            watchPrefs.getContinueWatchingSeriesIds()
-        }
-
-        val filteredList = filteredSeriesByCategory
-            .filter { series ->
-                val matchesCategory = when (selectedCategory?.id) {
-                    "FAVORITES" -> favoriteIds.contains(series.seriesId)
-                    "CONTINUE" -> continueSeriesIds.contains(series.seriesId)
-                    else -> true
-                }
-                val matchesSearch = searchQuery.isBlank() || series.title.contains(searchQuery, ignoreCase = true)
-                matchesCategory && matchesSearch
-            }
-            .let { list ->
-                if (selectedCategory?.id == "RECENT") {
-                    list.sortedWith(
-                        compareByDescending<SeriesData> { parseAddedTimestamp(it.lastModified) }
-                            .thenByDescending { it.seriesId.toLongOrNull() ?: 0L }
-                    )
-                } else {
-                    when (sortMode) {
-                        SeriesSortMode.ALPHA_ASC -> list.sortedBy { s -> s.title.lowercase(Locale.getDefault()) }
-                        SeriesSortMode.ALPHA_DESC -> list.sortedByDescending { s -> s.title.lowercase(Locale.getDefault()) }
-                        SeriesSortMode.NEWEST -> list.sortedWith(
-                            compareByDescending<SeriesData> { parseAddedTimestamp(it.lastModified) }
-                                .thenByDescending { it.seriesId.toLongOrNull() ?: 0L }
-                        )
-                    }
-                }
-            }
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -375,6 +443,7 @@ fun SeriesScreen(
                         )
                     } else {
                         LazyVerticalGrid(
+                            state = seriesGridState,
                             columns = GridCells.Fixed(5),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -383,6 +452,7 @@ fun SeriesScreen(
                         ) {
                             items(filteredList, key = { it.seriesId }) { item ->
                                 val isFav = favoriteIds.contains(item.seriesId)
+                                val isFirstItem = item.seriesId == filteredList.firstOrNull()?.seriesId
                                 SeriesCardItem(
                                     series = item,
                                     isFavorite = isFav,
@@ -390,7 +460,11 @@ fun SeriesScreen(
                                         watchPrefs.toggleSeriesFavorite(item.seriesId)
                                         favoriteIds = watchPrefs.getSeriesFavorites()
                                     },
-                                    onClick = { selectedSeriesForDetail = item }
+                                    onClick = {
+                                        selectedSeriesForDetail = item
+                                        onDetailSeriesChange?.invoke(item)
+                                    },
+                                    modifier = if (isFirstItem) Modifier.focusRequester(initialGridFocusRequester) else Modifier
                                 )
                             }
                         }
@@ -411,7 +485,8 @@ fun TopHeaderBar(
     onSearchToggle: () -> Unit,
     isSearchActive: Boolean,
     searchQuery: String,
-    onSearchQueryChange: (String) -> Unit
+    onSearchQueryChange: (String) -> Unit,
+    focusRequester: FocusRequester? = null
 ) {
     var currentTime by remember { mutableStateOf("") }
     var currentDate by remember { mutableStateOf("") }
@@ -443,6 +518,7 @@ fun TopHeaderBar(
             onClick = onBack,
             modifier = Modifier
                 .size(36.dp)
+                .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .onFocusChanged { isBackFocused = it.isFocused }
                 .background(
                     color = if (isBackFocused) Color(0xFFFFC107).copy(alpha = 0.3f) else Color.Transparent,
@@ -661,13 +737,14 @@ fun SeriesCardItem(
     series: SeriesData,
     isFavorite: Boolean,
     onToggleFavorite: () -> Unit,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var isFocused by remember { mutableStateOf(false) }
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .onFocusChanged { isFocused = it.isFocused }
             .clickable { onClick() }
@@ -772,6 +849,18 @@ fun SeriesDetailContent(
     var episodesMap by remember { mutableStateOf<Map<Int, List<SeriesEpisode>>>(emptyMap()) }
     var selectedSeason by remember { mutableStateOf<Int?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+
+    val detailFocusRequester = remember { FocusRequester() }
+
+    // Assegna il focus al tasto Indietro della schermata di dettaglio appena i dati terminano il caricamento
+    LaunchedEffect(isLoading) {
+        if (!isLoading) {
+            delay(150L)
+            try {
+                detailFocusRequester.requestFocus()
+            } catch (_: Exception) {}
+        }
+    }
 
     // Dialog per ripresa visione dell'episodio
     var selectedEpisodeForPlayback by remember { mutableStateOf<SeriesEpisode?>(null) }
@@ -928,7 +1017,8 @@ fun SeriesDetailContent(
             onSearchToggle = { },
             isSearchActive = false,
             searchQuery = "",
-            onSearchQueryChange = { }
+            onSearchQueryChange = { },
+            focusRequester = detailFocusRequester
         )
 
         if (isLoading) {

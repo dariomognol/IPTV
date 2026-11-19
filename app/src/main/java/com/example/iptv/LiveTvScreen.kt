@@ -121,8 +121,14 @@ fun LiveTvScreen(
     DisposableEffect(Unit) {
         val activity = context as? Activity
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        LivePlayerHolder.onChannelAutoSwitched = { backupChannel ->
+            selectedChannel = backupChannel
+            selectedChannelId = backupChannel.streamId
+            LiveTvCache.lastSelectedChannelId = backupChannel.streamId
+        }
         onDispose {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            LivePlayerHolder.onChannelAutoSwitched = null
         }
     }
 
@@ -206,7 +212,7 @@ fun LiveTvScreen(
         selectedChannel?.let { channel ->
             if (serverUrl.isNotEmpty() && username.isNotEmpty()) {
                 val streamUrl = "$serverUrl/live/$username/$password/${channel.streamId}.m3u8"
-                LivePlayerHolder.playStream(context, channel.streamId, streamUrl)
+                LivePlayerHolder.playStream(context, channel, streamUrl)
 
                 val epgFetched = mutableListOf<EpgProgram>()
                 withContext(Dispatchers.IO) {
@@ -239,6 +245,21 @@ fun LiveTvScreen(
                     }
                 }
                 epgList = epgFetched
+            }
+        }
+    }
+
+    // Controllo ping ultraleggero dei canali in background (Interrotto se il video è in riproduzione)
+    LaunchedEffect(displayedChannels, exoPlayer.isPlaying) {
+        if (!exoPlayer.isPlaying && serverUrl.isNotEmpty() && username.isNotEmpty()) {
+            val visibleChannels = displayedChannels.take(12)
+            for (channel in visibleChannels) {
+                if (LivePlayerHolder.channelLoadMap[channel.streamId] == null) {
+                    val streamUrl = "$serverUrl/live/$username/$password/${channel.streamId}.m3u8"
+                    val load = LivePlayerHolder.checkChannelHealthLightweight(streamUrl)
+                    LivePlayerHolder.channelLoadMap[channel.streamId] = load
+                    delay(250L)
+                }
             }
         }
     }
@@ -416,6 +437,28 @@ fun LiveTvScreen(
                             },
                             modifier = Modifier.fillMaxSize()
                         )
+
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Color.Black.copy(alpha = 0.75f),
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(8.dp)
+                        ) {
+                            val activeLoad = selectedChannel?.let { LivePlayerHolder.getChannelLoad(it.streamId) } ?: 15
+                            val badgeColor = when {
+                                activeLoad < 35 -> Color(0xFF4CAF50)
+                                activeLoad < 75 -> Color(0xFFFFC107)
+                                else -> Color(0xFFFF4242)
+                            }
+                            Text(
+                                text = "● Carico Server: $activeLoad%",
+                                color = badgeColor,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                            )
+                        }
 
                         Surface(
                             shape = RoundedCornerShape(4.dp),
@@ -773,6 +816,29 @@ fun LiveChannelRowItem(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
+
+            // Badge Carico Server % Reale
+            val loadPercentage = LivePlayerHolder.getChannelLoad(channel.streamId)
+
+            val loadColor = when {
+                loadPercentage < 35 -> Color(0xFF4CAF50)
+                loadPercentage < 75 -> Color(0xFFFFC107)
+                else -> Color(0xFFFF4242)
+            }
+
+            Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = loadColor.copy(alpha = 0.15f),
+                border = BorderStroke(1.dp, loadColor.copy(alpha = 0.4f))
+            ) {
+                Text(
+                    text = "$loadPercentage%",
+                    color = loadColor,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                )
+            }
 
             var isFavFocused by remember { mutableStateOf(false) }
             IconButton(

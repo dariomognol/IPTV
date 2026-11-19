@@ -185,6 +185,7 @@ class MainActivity : ComponentActivity() {
                                     timezoneId = selectedTimezoneId,
                                     onBack = { currentScreen = AppScreen.DASHBOARD },
                                     onMovieSelect = { movie, startPos ->
+                                        activeDetailMovie = movie
                                         nextEpisodeCallback = null
                                         currentAccount?.let { acc ->
                                             val ext = movie.containerExtension ?: "mp4"
@@ -218,6 +219,8 @@ class MainActivity : ComponentActivity() {
                                     username = currentAccount?.username ?: "",
                                     password = currentAccount?.password ?: "",
                                     timezoneId = selectedTimezoneId,
+                                    initialSelectedSeries = activeDetailSeries,
+                                    onDetailSeriesChange = { activeDetailSeries = it },
                                     onBack = { currentScreen = AppScreen.DASHBOARD },
                                     onEpisodeSelect = { episode, startPos, onNextEp ->
                                         nextEpisodeCallback = onNextEp
