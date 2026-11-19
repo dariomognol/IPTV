@@ -1,2 +1,2 @@
-Code for AFT: 3818735
-aftv.news/3818735
+Code for AFT: 2043885
+http://aftv.news/2043885
