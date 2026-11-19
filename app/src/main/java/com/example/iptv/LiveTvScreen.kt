@@ -132,6 +132,24 @@ fun LiveTvScreen(
         }
     }
 
+    val selectedCategoryName = remember(selectedCategoryId, categories) {
+        when (selectedCategoryId) {
+            "FAVORITES" -> "PREFERITI"
+            else -> categories.find { it.categoryId == selectedCategoryId }?.categoryName?.uppercase() ?: "LIVE TV"
+        }
+    }
+
+    val displayedChannels = remember(channels, selectedCategoryId, searchQuery, favoriteIds) {
+        channels.filter { ch ->
+            val matchesCat = when (selectedCategoryId) {
+                "FAVORITES" -> favoriteIds.contains(ch.streamId)
+                else -> ch.categoryId == selectedCategoryId
+            }
+            val matchesSearch = searchQuery.isBlank() || ch.name.contains(searchQuery, ignoreCase = true)
+            matchesCat && matchesSearch
+        }
+    }
+
     LaunchedEffect(serverUrl, username, password) {
         if (serverUrl.isNotEmpty() && username.isNotEmpty()) {
             if (!shouldRefresh && LiveTvCache.channels.isNotEmpty()) {
@@ -264,23 +282,7 @@ fun LiveTvScreen(
         }
     }
 
-    val selectedCategoryName = remember(selectedCategoryId, categories) {
-        when (selectedCategoryId) {
-            "FAVORITES" -> "PREFERITI"
-            else -> categories.find { it.categoryId == selectedCategoryId }?.categoryName?.uppercase() ?: "LIVE TV"
-        }
-    }
 
-    val displayedChannels = remember(channels, selectedCategoryId, searchQuery, favoriteIds) {
-        channels.filter { ch ->
-            val matchesCat = when (selectedCategoryId) {
-                "FAVORITES" -> favoriteIds.contains(ch.streamId)
-                else -> ch.categoryId == selectedCategoryId
-            }
-            val matchesSearch = searchQuery.isBlank() || ch.name.contains(searchQuery, ignoreCase = true)
-            matchesCat && matchesSearch
-        }
-    }
 
     Column(
         modifier = Modifier

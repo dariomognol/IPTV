@@ -54,6 +54,8 @@ class MainActivity : ComponentActivity() {
                     var currentStreamUrl by remember { mutableStateOf("") }
                     var startPositionMs by remember { mutableLongStateOf(0L) }
                     var nextEpisodeCallback by remember { mutableStateOf<(() -> Unit)?>(null) }
+                    var activeDetailMovie by remember { mutableStateOf<MovieItem?>(null) }
+                    var activeDetailSeries by remember { mutableStateOf<SeriesData?>(null) }
 
                     var showExitConfirmation by remember { mutableStateOf(false) }
 
@@ -183,6 +185,8 @@ class MainActivity : ComponentActivity() {
                                 MoviesScreen(
                                     account = currentAccount,
                                     timezoneId = selectedTimezoneId,
+                                    initialSelectedMovie = activeDetailMovie,
+                                    onDetailMovieChange = { activeDetailMovie = it },
                                     onBack = { currentScreen = AppScreen.DASHBOARD },
                                     onMovieSelect = { movie, startPos ->
                                         activeDetailMovie = movie
