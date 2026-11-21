@@ -121,14 +121,8 @@ fun LiveTvScreen(
     DisposableEffect(Unit) {
         val activity = context as? Activity
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        LivePlayerHolder.onChannelAutoSwitched = { backupChannel ->
-            selectedChannel = backupChannel
-            selectedChannelId = backupChannel.streamId
-            LiveTvCache.lastSelectedChannelId = backupChannel.streamId
-        }
         onDispose {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            LivePlayerHolder.onChannelAutoSwitched = null
         }
     }
 
@@ -156,60 +150,68 @@ fun LiveTvScreen(
                 categories = LiveTvCache.categories
                 channels = LiveTvCache.channels
                 isLoading = false
-            } else if (!shouldRefresh) {
-                val cached = cacheManager.getLiveCache(currentAccountKey)
-                if (cached != null && cached.second.isNotEmpty()) {
-                    categories = cached.first
-                    channels = cached.second
-                    LiveTvCache.categories = cached.first
-                    LiveTvCache.channels = cached.second
-                    isLoading = false
-                }
-            }
-
-            if (isLoading) {
+            } else {
                 withContext(Dispatchers.IO) {
-                    try {
-                        val fetchedCategories = mutableListOf<LiveCategory>()
-                        val fetchedChannels = mutableListOf<LiveChannel>()
-
-                        fetchedCategories.add(LiveCategory("FAVORITES", "PREFERITI"))
-
-                        val catUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_live_categories"
-                        val catArray = JSONArray(URL(catUrl).readText())
-                        for (i in 0 until catArray.length()) {
-                            val obj = catArray.getJSONObject(i)
-                            fetchedCategories.add(
-                                LiveCategory(
-                                    categoryId = obj.optString("category_id", ""),
-                                    categoryName = obj.optString("category_name", "")
-                                )
-                            )
+                    if (!shouldRefresh) {
+                        val cached = cacheManager.getLiveCache(currentAccountKey)
+                        if (cached != null && cached.second.isNotEmpty()) {
+                            withContext(Dispatchers.Main) {
+                                categories = cached.first
+                                channels = cached.second
+                                LiveTvCache.categories = cached.first
+                                LiveTvCache.channels = cached.second
+                                isLoading = false
+                            }
                         }
+                    }
 
-                        val streamUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_live_streams"
-                        val streamArray = JSONArray(URL(streamUrl).readText())
-                        for (i in 0 until streamArray.length()) {
-                            val obj = streamArray.getJSONObject(i)
-                            fetchedChannels.add(
-                                LiveChannel(
-                                    streamId = obj.optString("stream_id", ""),
-                                    name = obj.optString("name", ""),
-                                    categoryId = obj.optString("category_id", ""),
-                                    streamIcon = obj.optString("stream_icon", "").takeIf { it.isNotBlank() }
+                    if (isLoading) {
+                        try {
+                            val fetchedCategories = mutableListOf<LiveCategory>()
+                            val fetchedChannels = mutableListOf<LiveChannel>()
+
+                            fetchedCategories.add(LiveCategory("FAVORITES", "PREFERITI"))
+
+                            val catUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_live_categories"
+                            val catArray = JSONArray(URL(catUrl).readText())
+                            for (i in 0 until catArray.length()) {
+                                val obj = catArray.getJSONObject(i)
+                                fetchedCategories.add(
+                                    LiveCategory(
+                                        categoryId = obj.optString("category_id", ""),
+                                        categoryName = obj.optString("category_name", "")
+                                    )
                                 )
-                            )
-                        }
+                            }
 
-                        cacheManager.saveLiveCache(currentAccountKey, fetchedCategories, fetchedChannels)
-                        LiveTvCache.categories = fetchedCategories
-                        LiveTvCache.channels = fetchedChannels
-                        categories = fetchedCategories
-                        channels = fetchedChannels
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    } finally {
-                        isLoading = false
+                            val streamUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_live_streams"
+                            val streamArray = JSONArray(URL(streamUrl).readText())
+                            for (i in 0 until streamArray.length()) {
+                                val obj = streamArray.getJSONObject(i)
+                                fetchedChannels.add(
+                                    LiveChannel(
+                                        streamId = obj.optString("stream_id", ""),
+                                        name = obj.optString("name", ""),
+                                        categoryId = obj.optString("category_id", ""),
+                                        streamIcon = obj.optString("stream_icon", "").takeIf { it.isNotBlank() }
+                                    )
+                                )
+                            }
+
+                            cacheManager.saveLiveCache(currentAccountKey, fetchedCategories, fetchedChannels)
+                            LiveTvCache.categories = fetchedCategories
+                            LiveTvCache.channels = fetchedChannels
+                            withContext(Dispatchers.Main) {
+                                categories = fetchedCategories
+                                channels = fetchedChannels
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        } finally {
+                            withContext(Dispatchers.Main) {
+                                isLoading = false
+                            }
+                        }
                     }
                 }
             }
@@ -267,20 +269,7 @@ fun LiveTvScreen(
         }
     }
 
-    // Controllo ping ultraleggero dei canali in background (Interrotto se il video è in riproduzione)
-    LaunchedEffect(displayedChannels, exoPlayer.isPlaying) {
-        if (!exoPlayer.isPlaying && serverUrl.isNotEmpty() && username.isNotEmpty()) {
-            val visibleChannels = displayedChannels.take(12)
-            for (channel in visibleChannels) {
-                if (LivePlayerHolder.channelLoadMap[channel.streamId] == null) {
-                    val streamUrl = "$serverUrl/live/$username/$password/${channel.streamId}.m3u8"
-                    val load = LivePlayerHolder.checkChannelHealthLightweight(streamUrl)
-                    LivePlayerHolder.channelLoadMap[channel.streamId] = load
-                    delay(250L)
-                }
-            }
-        }
-    }
+
 
 
 
@@ -321,7 +310,7 @@ fun LiveTvScreen(
                         contentPadding = PaddingValues(10.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        items(categories, key = { it.categoryId }) { category ->
+                        items(categories, key = { it.categoryId }, contentType = { "category" }) { category ->
                             val isSelected = category.categoryId == selectedCategoryId
                             LiveCategorySidebarItem(
                                 category = category,
@@ -373,7 +362,7 @@ fun LiveTvScreen(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(displayedChannels, key = { it.streamId }) { channel ->
+                        items(displayedChannels, key = { it.streamId }, contentType = { "channel" }) { channel ->
                             val isSelected = channel.streamId == selectedChannel?.streamId
                             val isFav = favoriteIds.contains(channel.streamId)
 
@@ -477,6 +466,37 @@ fun LiveTvScreen(
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
                             )
                         }
+
+                        val errorState = LivePlayerHolder.playbackErrorState
+                        if (errorState != null) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = Color(0xDDCC0000),
+                                border = BorderStroke(1.dp, Color(0xFFFF5252)),
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Warning,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = errorState,
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -528,7 +548,7 @@ fun LiveTvScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                items(epgList, key = { it.start + it.title }) { prog ->
+                                items(epgList, key = { it.start + it.title }, contentType = { "epg" }) { prog ->
                                     Surface(
                                         shape = RoundedCornerShape(6.dp),
                                         color = Color(0xFF132A4D),

@@ -180,13 +180,17 @@ fun MoviesScreen(
         }
 
         if (!shouldRefresh) {
-            val cached = cacheManager.getMoviesCache(accountKey)
-            if (cached != null && cached.second.isNotEmpty()) {
-                categories = cached.first
-                moviesList = cached.second
-                isLoading = false
-                return@LaunchedEffect
+            withContext(Dispatchers.IO) {
+                val cached = cacheManager.getMoviesCache(accountKey)
+                if (cached != null && cached.second.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        categories = cached.first
+                        moviesList = cached.second
+                        isLoading = false
+                    }
+                }
             }
+            if (!isLoading) return@LaunchedEffect
         }
 
         isLoading = true
@@ -391,7 +395,7 @@ fun MoviesScreen(
                             contentPadding = PaddingValues(12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            itemsIndexed(categories, key = { idx, cat -> "${cat.categoryId}_$idx" }) { _, cat ->
+                            itemsIndexed(categories, key = { _, cat -> cat.categoryId }, contentType = { _, _ -> "category" }) { _, cat ->
                                 val isSelected = cat.categoryId == selectedCategoryId
                                 MovieCategorySidebarItem(
                                     category = cat,
@@ -443,7 +447,7 @@ fun MoviesScreen(
                             contentPadding = PaddingValues(bottom = 16.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            itemsIndexed(filteredMovies, key = { idx, movie -> "${movie.streamId}_$idx" }) { idx, movie ->
+                            itemsIndexed(filteredMovies, key = { _, movie -> movie.streamId }, contentType = { _, _ -> "movie" }) { idx, movie ->
                                 val isFirstItem = idx == 0
                                 val isFav = favoriteIds.contains(movie.streamId)
                                 val pos = watchPrefs.getPosition(movie.streamId)

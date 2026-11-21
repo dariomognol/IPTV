@@ -338,14 +338,12 @@ fun TopDashboardHeader(
     var currentTime by remember { mutableStateOf("") }
     var isRefreshing by remember { mutableStateOf(false) }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "RefreshRotation")
-    val rotationAngle by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
+    val rotationAngle by animateFloatAsState(
+        targetValue = if (isRefreshing) 360f else 0f,
+        animationSpec = if (isRefreshing) infiniteRepeatable(
             animation = tween(1000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
-        ),
+        ) else tween(0),
         label = "Rotation"
     )
 

@@ -205,15 +205,19 @@ fun SeriesScreen(
     // Caricamento Categorie e Serie
     LaunchedEffect(Unit) {
         if (!shouldRefresh) {
-            val cached = cacheManager.getSeriesCache(accountKey)
-            if (cached != null && cached.second.isNotEmpty()) {
-                categories = cached.first
-                seriesList = cached.second
-                selectedCategory = cached.first.firstOrNull()
-                isLoadingCategories = false
-                isLoadingSeries = false
-                return@LaunchedEffect
+            withContext(Dispatchers.IO) {
+                val cached = cacheManager.getSeriesCache(accountKey)
+                if (cached != null && cached.second.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        categories = cached.first
+                        seriesList = cached.second
+                        selectedCategory = cached.first.firstOrNull()
+                        isLoadingCategories = false
+                        isLoadingSeries = false
+                    }
+                }
             }
+            if (!isLoadingCategories && !isLoadingSeries) return@LaunchedEffect
         }
 
         withContext(Dispatchers.IO) {
@@ -405,7 +409,7 @@ fun SeriesScreen(
                             contentPadding = PaddingValues(12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            items(categories, key = { it.id }) { category ->
+                            items(categories, key = { it.id }, contentType = { "category" }) { category ->
                                 val isSelected = category.id == selectedCategory?.id
                                 CategorySidebarItem(
                                     category = category,
@@ -450,7 +454,7 @@ fun SeriesScreen(
                             contentPadding = PaddingValues(bottom = 16.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            items(filteredList, key = { it.seriesId }) { item ->
+                            items(filteredList, key = { it.seriesId }, contentType = { "series" }) { item ->
                                 val isFav = favoriteIds.contains(item.seriesId)
                                 val isFirstItem = item.seriesId == filteredList.firstOrNull()?.seriesId
                                 SeriesCardItem(
@@ -1105,7 +1109,7 @@ fun SeriesDetailContent(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(seasonsList, key = { it }) { season ->
+                        items(seasonsList, key = { it }, contentType = { "season" }) { season ->
                             val isSelected = season == selectedSeason
                             var isFocused by remember { mutableStateOf(false) }
                             Surface(
@@ -1139,7 +1143,7 @@ fun SeriesDetailContent(
                             .fillMaxWidth()
                             .height(260.dp)
                     ) {
-                        items(currentEpisodes, key = { it.id }) { ep ->
+                        items(currentEpisodes, key = { it.id }, contentType = { "episode" }) { ep ->
                             var isFocused by remember { mutableStateOf(false) }
                             val savedPos = watchPrefs.getPosition(ep.id)
 

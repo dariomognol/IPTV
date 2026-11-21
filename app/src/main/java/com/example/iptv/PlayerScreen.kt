@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -253,6 +254,38 @@ fun PlayerScreen(
                     controlsVisible = !controlsVisible
                 }
         )
+
+        // Overlay stato errore di playback (es: Errore playback 1/5)
+        val liveErrorState = LivePlayerHolder.playbackErrorState
+        if (isLiveStream && liveErrorState != null) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xDDCC0000),
+                border = BorderStroke(1.dp, Color(0xFFFF5252)),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 60.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = liveErrorState,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
 
         // 3. Controlli Overlay
         AnimatedVisibility(
