@@ -235,4 +235,17 @@ object LivePlayerHolder {
         loadProgressRunnable?.let { handler.removeCallbacks(it) }
         loadProgressRunnable = null
     }
+
+    fun stopStream() {
+        cancelRetryProcess()
+        stopBufferingProgress()
+        playbackErrorState = null
+        healthCheckJob?.cancel()
+        currentStreamId = ""
+        currentStreamUrl = ""
+        exoPlayer?.let { player ->
+            player.stop()
+            player.clearMediaItems()
+        }
+    }
 }

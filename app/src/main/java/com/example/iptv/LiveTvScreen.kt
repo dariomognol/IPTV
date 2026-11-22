@@ -35,6 +35,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -123,6 +124,7 @@ fun LiveTvScreen(
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            LivePlayerHolder.stopStream()
         }
     }
 
@@ -173,7 +175,15 @@ fun LiveTvScreen(
                             fetchedCategories.add(LiveCategory("FAVORITES", "PREFERITI"))
 
                             val catUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_live_categories"
-                            val catArray = JSONArray(URL(catUrl).readText())
+                            val streamUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_live_streams"
+
+                            val catDeferred = async(Dispatchers.IO) { NetworkUtils.fetchUrlOptimized(catUrl) }
+                            val streamDeferred = async(Dispatchers.IO) { NetworkUtils.fetchUrlOptimized(streamUrl) }
+
+                            val catText = catDeferred.await()
+                            val streamText = streamDeferred.await()
+
+                            val catArray = JSONArray(catText)
                             for (i in 0 until catArray.length()) {
                                 val obj = catArray.getJSONObject(i)
                                 fetchedCategories.add(
@@ -184,8 +194,7 @@ fun LiveTvScreen(
                                 )
                             }
 
-                            val streamUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_live_streams"
-                            val streamArray = JSONArray(URL(streamUrl).readText())
+                            val streamArray = JSONArray(streamText)
                             for (i in 0 until streamArray.length()) {
                                 val obj = streamArray.getJSONObject(i)
                                 fetchedChannels.add(

@@ -35,8 +35,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.saveable.rememberSaveable
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -46,6 +48,20 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+
+object MoviesCache {
+    var accountKey: String = ""
+    var categories: List<CategoryItem> = emptyList()
+    var moviesList: List<MovieItem> = emptyList()
+    var lastSelectedCategoryId: String = "ALL"
+
+    fun clear() {
+        accountKey = ""
+        categories = emptyList()
+        moviesList = emptyList()
+        lastSelectedCategoryId = "ALL"
+    }
+}
 
 object MoviesScrollStateHolder {
     var index: Int = 0
@@ -110,21 +126,6 @@ fun MoviesScreen(
 
     val initialGridFocusRequester = remember { FocusRequester() }
 
-    var categories by remember { mutableStateOf<List<CategoryItem>>(emptyList()) }
-    var moviesList by remember { mutableStateOf<List<MovieItem>>(emptyList()) }
-    var selectedMovieForDetail by remember { mutableStateOf<MovieItem?>(initialSelectedMovie) }
-
-    var selectedCategoryId by remember { mutableStateOf("ALL") }
-    var searchQuery by remember { mutableStateOf("") }
-    var isSearchActive by remember { mutableStateOf(false) }
-    var sortMode by remember { mutableStateOf(MovieSortMode.ALPHA_ASC) }
-
-    var isLoading by remember { mutableStateOf(true) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-
-    // Lista Preferiti
-    var favoriteIds by remember { mutableStateOf(watchPrefs.getFavorites()) }
-
     fun getAccountProperty(propName: String): String {
         if (account == null) return ""
         return try {
@@ -145,6 +146,26 @@ fun MoviesScreen(
     val accountKey = remember(serverUrl, username) { "${serverUrl}_$username" }
     val cacheManager = remember { IptvCacheManager(context) }
     val shouldRefresh = remember { cacheManager.shouldRefresh(context, accountKey) }
+
+    if (MoviesCache.accountKey.isNotEmpty() && MoviesCache.accountKey != accountKey) {
+        MoviesCache.clear()
+    }
+    MoviesCache.accountKey = accountKey
+
+    var categories by remember { mutableStateOf<List<CategoryItem>>(MoviesCache.categories) }
+    var moviesList by remember { mutableStateOf<List<MovieItem>>(MoviesCache.moviesList) }
+    var selectedMovieForDetail by remember { mutableStateOf<MovieItem?>(initialSelectedMovie) }
+
+    var selectedCategoryId by rememberSaveable { mutableStateOf(MoviesCache.lastSelectedCategoryId.ifEmpty { "ALL" }) }
+    var searchQuery by remember { mutableStateOf("") }
+    var isSearchActive by remember { mutableStateOf(false) }
+    var sortMode by remember { mutableStateOf(MovieSortMode.ALPHA_ASC) }
+
+    var isLoading by remember { mutableStateOf(MoviesCache.moviesList.isEmpty()) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    // Lista Preferiti
+    var favoriteIds by remember { mutableStateOf(watchPrefs.getFavorites()) }
 
     BackHandler {
         if (selectedMovieForDetail != null) {
@@ -179,62 +200,59 @@ fun MoviesScreen(
             return@LaunchedEffect
         }
 
-        if (!shouldRefresh) {
+        if (MoviesCache.moviesList.isNotEmpty()) {
+            categories = MoviesCache.categories
+            moviesList = MoviesCache.moviesList
+            isLoading = false
+        } else if (!shouldRefresh) {
             withContext(Dispatchers.IO) {
                 val cached = cacheManager.getMoviesCache(accountKey)
                 if (cached != null && cached.second.isNotEmpty()) {
                     withContext(Dispatchers.Main) {
                         categories = cached.first
                         moviesList = cached.second
+                        MoviesCache.categories = cached.first
+                        MoviesCache.moviesList = cached.second
                         isLoading = false
                     }
                 }
             }
-            if (!isLoading) return@LaunchedEffect
         }
 
-        isLoading = true
-        errorMessage = null
+        if (isLoading || shouldRefresh) {
+            if (MoviesCache.moviesList.isEmpty()) {
+                isLoading = true
+            }
+            errorMessage = null
 
-        withContext(Dispatchers.IO) {
-            try {
-                val catList = mutableListOf<CategoryItem>()
-                catList.add(CategoryItem("ALL", "TUTTI I FILM"))
-                catList.add(CategoryItem("FAVORITES", "PREFERITI"))
-                catList.add(CategoryItem("CONTINUE", "CONTINUA A GUARDARE"))
-                catList.add(CategoryItem("RECENT", "AGGIUNTI DI RECENTE"))
+            withContext(Dispatchers.IO) {
+                try {
+                    val catList = mutableListOf<CategoryItem>()
+                    catList.add(CategoryItem("ALL", "TUTTI I FILM"))
+                    catList.add(CategoryItem("FAVORITES", "PREFERITI"))
+                    catList.add(CategoryItem("CONTINUE", "CONTINUA A GUARDARE"))
+                    catList.add(CategoryItem("RECENT", "AGGIUNTI DI RECENTE"))
 
-                // 1. Categorie Film
-                val catUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_vod_categories"
-                val connCat = URL(catUrl).openConnection() as HttpURLConnection
-                connCat.connectTimeout = 10000
-                connCat.readTimeout = 10000
-                if (connCat.responseCode == 200) {
-                    val res = connCat.inputStream.bufferedReader().use { it.readText() }.trim()
-                    if (res.startsWith("[")) {
-                        val jsonArr = JSONArray(res)
+                    val catUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_vod_categories"
+                    val vodUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_vod_streams"
+
+                    val catDeferred = async(Dispatchers.IO) { NetworkUtils.fetchUrlOptimized(catUrl) }
+                    val vodDeferred = async(Dispatchers.IO) { NetworkUtils.fetchUrlOptimized(vodUrl) }
+
+                    val catRes = catDeferred.await().trim()
+                    val vodRes = vodDeferred.await().trim()
+
+                    if (catRes.startsWith("[")) {
+                        val jsonArr = JSONArray(catRes)
                         for (i in 0 until jsonArr.length()) {
                             val obj = jsonArr.getJSONObject(i)
                             catList.add(CategoryItem(obj.optString("category_id"), obj.optString("category_name")))
                         }
                     }
-                }
 
-                withContext(Dispatchers.Main) {
-                    categories = catList
-                }
-
-                // 2. Film VOD
-                val vodUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_vod_streams"
-                val connVod = URL(vodUrl).openConnection() as HttpURLConnection
-                connVod.connectTimeout = 15000
-                connVod.readTimeout = 15000
-                if (connVod.responseCode == 200) {
-                    val res = connVod.inputStream.bufferedReader().use { it.readText() }.trim()
                     val movieList = mutableListOf<MovieItem>()
-
-                    if (res.startsWith("[")) {
-                        val jsonArr = JSONArray(res)
+                    if (vodRes.startsWith("[")) {
+                        val jsonArr = JSONArray(vodRes)
                         for (i in 0 until jsonArr.length()) {
                             val obj = jsonArr.getJSONObject(i)
                             val rawIcon = obj.optString("stream_icon").ifEmpty { obj.optString("cover") }
@@ -256,21 +274,23 @@ fun MoviesScreen(
                     }
 
                     cacheManager.saveMoviesCache(accountKey, catList, movieList)
+                    MoviesCache.categories = catList
+                    MoviesCache.moviesList = movieList
+
                     withContext(Dispatchers.Main) {
+                        categories = catList
                         moviesList = movieList
                     }
-                } else {
+                } catch (e: Throwable) {
                     withContext(Dispatchers.Main) {
-                        errorMessage = "Errore caricamento film HTTP ${connVod.responseCode}"
+                        if (MoviesCache.moviesList.isEmpty()) {
+                            errorMessage = "Impossibile caricare i film: ${e.localizedMessage ?: "Errore di connessione"}"
+                        }
                     }
-                }
-            } catch (e: Throwable) {
-                withContext(Dispatchers.Main) {
-                    errorMessage = "Impossibile caricare i film: ${e.localizedMessage ?: "Errore di connessione"}"
-                }
-            } finally {
-                withContext(Dispatchers.Main) {
-                    isLoading = false
+                } finally {
+                    withContext(Dispatchers.Main) {
+                        isLoading = false
+                    }
                 }
             }
         }

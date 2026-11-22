@@ -64,7 +64,7 @@ fun SmartersDashboardScreen(
     onNavigateToMovies: () -> Unit = {},
     onNavigateToSeries: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
-    onRefreshData: () -> Unit = {},
+    onRefreshData: suspend () -> Unit = {},
     onExitApp: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -330,7 +330,7 @@ fun TopDashboardHeader(
     timezoneId: String = "Europe/Rome",
     onAccountClick: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
-    onRefreshData: () -> Unit = {},
+    onRefreshData: suspend () -> Unit = {},
     onExitApp: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -387,12 +387,10 @@ fun TopDashboardHeader(
                 onClick = {
                     if (!isRefreshing) {
                         isRefreshing = true
-                        Toast.makeText(context, "Aggiornamento dati...", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "🔄 Download aggiornamenti dal server in corso...", Toast.LENGTH_SHORT).show()
                         scope.launch {
                             onRefreshData()
-                            delay(2000)
                             isRefreshing = false
-                            Toast.makeText(context, "Dati aggiornati!", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }

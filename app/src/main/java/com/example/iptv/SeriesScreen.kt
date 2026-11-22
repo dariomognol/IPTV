@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -75,6 +76,18 @@ fun getAbsoluteImageUrl(serverUrl: String, iconUrl: String?): String? {
     val cleanBase = serverUrl.trimEnd('/')
     val cleanPath = iconUrl.trimStart('/')
     return "$cleanBase/$cleanPath"
+}
+
+object SeriesCache {
+    var accountKey: String = ""
+    var categories: List<SeriesCategory> = emptyList()
+    var seriesList: List<SeriesData> = emptyList()
+
+    fun clear() {
+        accountKey = ""
+        categories = emptyList()
+        seriesList = emptyList()
+    }
 }
 
 object SeriesScrollStateHolder {
@@ -159,14 +172,23 @@ fun SeriesScreen(
     val context = LocalContext.current
     val watchPrefs = remember { WatchPreferences(context) }
 
-    var categories by remember { mutableStateOf<List<SeriesCategory>>(emptyList()) }
-    var selectedCategory by remember { mutableStateOf<SeriesCategory?>(null) }
-    var seriesList by remember { mutableStateOf<List<SeriesData>>(emptyList()) }
+    val accountKey = remember(serverUrl, username) { "${serverUrl}_$username" }
+    val cacheManager = remember { IptvCacheManager(context) }
+    val shouldRefresh = remember { cacheManager.shouldRefresh(context, accountKey) }
+
+    if (SeriesCache.accountKey.isNotEmpty() && SeriesCache.accountKey != accountKey) {
+        SeriesCache.clear()
+    }
+    SeriesCache.accountKey = accountKey
+
+    var categories by remember { mutableStateOf<List<SeriesCategory>>(SeriesCache.categories) }
+    var selectedCategory by remember { mutableStateOf<SeriesCategory?>(SeriesCache.categories.firstOrNull()) }
+    var seriesList by remember { mutableStateOf<List<SeriesData>>(SeriesCache.seriesList) }
     var selectedSeriesForDetail by remember { mutableStateOf<SeriesData?>(initialSelectedSeries) }
     var favoriteIds by remember { mutableStateOf(watchPrefs.getSeriesFavorites()) }
 
-    var isLoadingCategories by remember { mutableStateOf(true) }
-    var isLoadingSeries by remember { mutableStateOf(false) }
+    var isLoadingCategories by remember { mutableStateOf(SeriesCache.categories.isEmpty()) }
+    var isLoadingSeries by remember { mutableStateOf(SeriesCache.seriesList.isEmpty()) }
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
     var sortMode by remember { mutableStateOf(SeriesSortMode.ALPHA_ASC) }
@@ -185,10 +207,6 @@ fun SeriesScreen(
 
     val initialGridFocusRequester = remember { FocusRequester() }
 
-    val accountKey = remember(serverUrl, username) { "${serverUrl}_$username" }
-    val cacheManager = remember { IptvCacheManager(context) }
-    val shouldRefresh = remember { cacheManager.shouldRefresh(context, accountKey) }
-
     BackHandler {
         if (selectedSeriesForDetail != null) {
             selectedSeriesForDetail = null
@@ -203,81 +221,107 @@ fun SeriesScreen(
     }
 
     // Caricamento Categorie e Serie
-    LaunchedEffect(Unit) {
-        if (!shouldRefresh) {
+    LaunchedEffect(accountKey) {
+        if (SeriesCache.seriesList.isNotEmpty()) {
+            categories = SeriesCache.categories
+            seriesList = SeriesCache.seriesList
+            selectedCategory = SeriesCache.categories.firstOrNull()
+            isLoadingCategories = false
+            isLoadingSeries = false
+        } else if (!shouldRefresh) {
             withContext(Dispatchers.IO) {
                 val cached = cacheManager.getSeriesCache(accountKey)
                 if (cached != null && cached.second.isNotEmpty()) {
                     withContext(Dispatchers.Main) {
                         categories = cached.first
                         seriesList = cached.second
+                        SeriesCache.categories = cached.first
+                        SeriesCache.seriesList = cached.second
                         selectedCategory = cached.first.firstOrNull()
                         isLoadingCategories = false
                         isLoadingSeries = false
                     }
                 }
             }
-            if (!isLoadingCategories && !isLoadingSeries) return@LaunchedEffect
         }
 
-        withContext(Dispatchers.IO) {
-            try {
-                val catUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_series_categories"
-                val conn = URL(catUrl).openConnection() as HttpURLConnection
-                if (conn.responseCode == 200) {
-                    val res = conn.inputStream.bufferedReader().use { it.readText() }
-                    val jsonArr = JSONArray(res)
-                    val list = mutableListOf<SeriesCategory>()
-                    list.add(SeriesCategory("ALL", "TUTTE LE SERIE"))
-                    list.add(SeriesCategory("FAVORITES", "PREFERITI"))
-                    list.add(SeriesCategory("CONTINUE", "CONTINUA A GUARDARE"))
-                    list.add(SeriesCategory("RECENT", "AGGIUNTI DI RECENTE"))
+        if (isLoadingCategories || isLoadingSeries || shouldRefresh) {
+            if (SeriesCache.seriesList.isEmpty()) {
+                isLoadingCategories = true
+                isLoadingSeries = true
+            }
 
-                    for (i in 0 until jsonArr.length()) {
-                        val obj = jsonArr.getJSONObject(i)
-                        list.add(
-                            SeriesCategory(
-                                id = obj.optString("category_id"),
-                                name = obj.optString("category_name")
+            withContext(Dispatchers.IO) {
+                try {
+                    val catUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_series_categories"
+                    val seriesUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_series"
+
+                    val catDeferred = async(Dispatchers.IO) { NetworkUtils.fetchUrlOptimized(catUrl) }
+                    val serDeferred = async(Dispatchers.IO) { NetworkUtils.fetchUrlOptimized(seriesUrl) }
+
+                    val catRes = catDeferred.await().trim()
+                    val serRes = serDeferred.await().trim()
+
+                    val listCat = mutableListOf<SeriesCategory>()
+                    listCat.add(SeriesCategory("ALL", "TUTTE LE SERIE"))
+                    listCat.add(SeriesCategory("FAVORITES", "PREFERITI"))
+                    listCat.add(SeriesCategory("CONTINUE", "CONTINUA A GUARDARE"))
+                    listCat.add(SeriesCategory("RECENT", "AGGIUNTI DI RECENTE"))
+
+                    if (catRes.startsWith("[")) {
+                        val jsonArr = JSONArray(catRes)
+                        for (i in 0 until jsonArr.length()) {
+                            val obj = jsonArr.getJSONObject(i)
+                            listCat.add(
+                                SeriesCategory(
+                                    id = obj.optString("category_id"),
+                                    name = obj.optString("category_name")
+                                )
                             )
-                        )
+                        }
                     }
-                    categories = list
-                    selectedCategory = list.firstOrNull()
-                }
 
-                val seriesUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_series"
-                val connSer = URL(seriesUrl).openConnection() as HttpURLConnection
-                if (connSer.responseCode == 200) {
-                    val res = connSer.inputStream.bufferedReader().use { it.readText() }
-                    val jsonArr = JSONArray(res)
-                    val list = mutableListOf<SeriesData>()
+                    val listSer = mutableListOf<SeriesData>()
+                    if (serRes.startsWith("[")) {
+                        val jsonArr = JSONArray(serRes)
+                        for (i in 0 until jsonArr.length()) {
+                            val obj = jsonArr.getJSONObject(i)
+                            val rawCover = obj.optString("cover")
+                            val fullCover = getAbsoluteImageUrl(serverUrl, rawCover)
+                            val lastMod = obj.optString("last_modified").ifEmpty { obj.optString("added") }
 
-                    for (i in 0 until jsonArr.length()) {
-                        val obj = jsonArr.getJSONObject(i)
-                        val rawCover = obj.optString("cover")
-                        val fullCover = getAbsoluteImageUrl(serverUrl, rawCover)
-                        val lastMod = obj.optString("last_modified").ifEmpty { obj.optString("added") }
-
-                        list.add(
-                            SeriesData(
-                                seriesId = obj.optString("series_id"),
-                                title = obj.optString("name"),
-                                coverUrl = fullCover,
-                                categoryId = obj.optString("category_id"),
-                                releaseDate = obj.optString("releaseDate", obj.optString("last_modified")),
-                                lastModified = lastMod,
-                                rating = obj.optString("rating_5based", "0").toFloatOrNull() ?: 0f
+                            listSer.add(
+                                SeriesData(
+                                    seriesId = obj.optString("series_id"),
+                                    title = obj.optString("name"),
+                                    coverUrl = fullCover,
+                                    categoryId = obj.optString("category_id"),
+                                    releaseDate = obj.optString("releaseDate", obj.optString("last_modified")),
+                                    lastModified = lastMod,
+                                    rating = obj.optString("rating_5based", "0").toFloatOrNull() ?: 0f
+                                )
                             )
-                        )
+                        }
                     }
-                    seriesList = list
-                    cacheManager.saveSeriesCache(accountKey, categories, list)
+
+                    cacheManager.saveSeriesCache(accountKey, listCat, listSer)
+                    SeriesCache.categories = listCat
+                    SeriesCache.seriesList = listSer
+
+                    withContext(Dispatchers.Main) {
+                        categories = listCat
+                        seriesList = listSer
+                        if (selectedCategory == null) {
+                            selectedCategory = listCat.firstOrNull()
+                        }
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    withContext(Dispatchers.Main) {
+                        isLoadingCategories = false
+                        isLoadingSeries = false
+                    }
                 }
-            } catch (_: Exception) {
-            } finally {
-                isLoadingCategories = false
-                isLoadingSeries = false
             }
         }
     }

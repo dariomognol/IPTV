@@ -3,12 +3,12 @@ package com.example.iptv
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -43,19 +43,23 @@ fun LoginScreen(
     var serverUrl by remember { mutableStateOf("http://") }
 
     var errorMessage by remember { mutableStateOf("") }
+    val scrollState = rememberScrollState()
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBackgroundLogin),
+            .background(DarkBackgroundLogin)
+            .padding(vertical = 16.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
                 .width(480.dp)
+                .wrapContentHeight()
                 .clip(RoundedCornerShape(20.dp))
                 .background(CardBackgroundLogin)
-                .padding(32.dp),
+                .padding(28.dp)
+                .verticalScroll(scrollState),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             if (onBack != null) {
@@ -83,32 +87,32 @@ fun LoginScreen(
                 imageVector = Icons.Default.PlayCircle,
                 contentDescription = null,
                 tint = AccentBlue,
-                modifier = Modifier.size(50.dp)
+                modifier = Modifier.size(46.dp)
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "AGGIUNGI UTENTE XSTREAM",
-                fontSize = 22.sp,
+                text = "AGGIUNGI UTENTE XTREAM",
+                fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
             Text(
-                text = "Inserisci i dati XSTREAM",
+                text = "Inserisci i dati della tua lista Xtream Codes",
                 fontSize = 12.sp,
                 color = Color.Gray
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
-            // Campo 1: Any Name
+            // Campo 1: Nome Lista
             TvOutlinedTextField(
                 value = playlistName,
                 onValueChange = { playlistName = it },
-                label = "Nome (es. Mia TV)",
+                label = "Nome Playlist (es. Mia TV)",
                 leadingIcon = Icons.Default.Bookmark
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Campo 2: Username
             TvOutlinedTextField(
@@ -118,7 +122,7 @@ fun LoginScreen(
                 leadingIcon = Icons.Default.Person
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Campo 3: Password
             TvOutlinedTextField(
@@ -129,13 +133,13 @@ fun LoginScreen(
                 isPassword = true
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Campo 4: Server URL
             TvOutlinedTextField(
                 value = serverUrl,
                 onValueChange = { serverUrl = it },
-                label = "http://url_here.com:port",
+                label = "URL Server (es. http://server.tv:8080)",
                 leadingIcon = Icons.Default.Link
             )
 
@@ -150,12 +154,12 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Pulsante ADD USER
+            // Pulsante CONFERMA E AGGIUNGI UTENTE
             LoginButton(
-                text = "AGGIUNGI UTENTE ",
+                text = "CONFERMA E AGGIUNGI UTENTE",
                 onClick = {
                     if (username.isBlank() || password.isBlank() || serverUrl.isBlank()) {
-                        errorMessage = "Compila tutti i campi obbligatori"
+                        errorMessage = "Compila tutti i campi obbligatori (Username, Password, Server URL)"
                     } else {
                         val account = UserAccount(
                             playlistName = if (playlistName.isBlank()) "Utente IPTV" else playlistName,
@@ -182,7 +186,7 @@ fun TvOutlinedTextField(
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        label = { Text(label, color = Color.Gray, fontSize = 13.sp) },
+        label = { Text(label, color = Color.Gray, fontSize = 12.sp) },
         leadingIcon = { Icon(leadingIcon, contentDescription = null, tint = AccentBlue) },
         singleLine = true,
         visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
@@ -207,27 +211,35 @@ fun LoginButton(
 ) {
     var isFocused by remember { mutableStateOf(false) }
 
-    Box(
+    Button(
+        onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .height(50.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (isFocused) Color(0xFF00E5FF) else AccentBlue)
-            .onFocusChanged { isFocused = it.isFocused }
-            .border(
-                width = if (isFocused) 2.dp else 0.dp,
-                color = Color.White,
-                shape = RoundedCornerShape(10.dp)
-            )
-            .focusable()
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
+            .height(52.dp)
+            .onFocusChanged { isFocused = it.isFocused },
+        shape = RoundedCornerShape(10.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (isFocused) Color(0xFF00E5FF) else AccentBlue,
+            contentColor = if (isFocused) Color.Black else Color.White
+        ),
+        border = if (isFocused) BorderStroke(2.dp, Color.White) else null
     ) {
-        Text(
-            text = text,
-            color = if (isFocused) Color.Black else Color.White,
-            fontWeight = FontWeight.Bold,
-            fontSize = 16.sp
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = if (isFocused) Color.Black else Color.White,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = text,
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp
+            )
+        }
     }
 }

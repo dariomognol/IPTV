@@ -14,6 +14,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 
 enum class AppScreen {
     DASHBOARD,
@@ -128,17 +132,35 @@ class MainActivity : ComponentActivity() {
                                         currentScreen = AppScreen.LIVE_TV
                                     },
                                     onNavigateToMovies = {
+                                        LivePlayerHolder.stopStream()
                                         currentScreen = AppScreen.MOVIES
                                     },
                                     onNavigateToSeries = {
+                                        LivePlayerHolder.stopStream()
                                         currentScreen = AppScreen.SERIES
                                     },
                                     onNavigateToSettings = {
+                                        LivePlayerHolder.stopStream()
                                         currentScreen = AppScreen.SETTINGS
                                     },
                                     onRefreshData = {
-                                        LiveTvCache.clear()
-                                        Toast.makeText(this@MainActivity, "Lista canali e EPG aggiornati!", Toast.LENGTH_SHORT).show()
+                                        currentAccount?.let { acc ->
+                                            performFullRefresh(acc) { live, mov, ser ->
+                                                if (live >= 0) {
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        "✅ Aggiornamento completato!\nScaricati: $live Canali, $mov Film, $ser Serie TV",
+                                                        Toast.LENGTH_LONG
+                                                    ).show()
+                                                } else {
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        "⚠️ Errore durante l'aggiornamento dati dal server",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                            }
+                                        }
                                     },
                                     onExitApp = {
                                         showExitConfirmation = true
@@ -151,7 +173,7 @@ class MainActivity : ComponentActivity() {
                                     account = currentAccount,
                                     timezoneId = selectedTimezoneId,
                                     onBack = {
-                                        LivePlayerHolder.exoPlayer?.pause()
+                                        LivePlayerHolder.stopStream()
                                         currentScreen = AppScreen.DASHBOARD
                                     },
                                     onChannelSelect = { channel ->
@@ -189,6 +211,7 @@ class MainActivity : ComponentActivity() {
                                     onDetailMovieChange = { activeDetailMovie = it },
                                     onBack = { currentScreen = AppScreen.DASHBOARD },
                                     onMovieSelect = { movie, startPos ->
+                                        LivePlayerHolder.stopStream()
                                         activeDetailMovie = movie
                                         nextEpisodeCallback = null
                                         currentAccount?.let { acc ->
@@ -227,6 +250,7 @@ class MainActivity : ComponentActivity() {
                                     onDetailSeriesChange = { activeDetailSeries = it },
                                     onBack = { currentScreen = AppScreen.DASHBOARD },
                                     onEpisodeSelect = { episode, startPos, onNextEp ->
+                                        LivePlayerHolder.stopStream()
                                         nextEpisodeCallback = onNextEp
                                         currentAccount?.let { acc ->
                                             val ext = episode.containerExtension
@@ -307,6 +331,171 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private suspend fun performFullRefresh(
+        account: UserAccount,
+        onComplete: (liveCount: Int, moviesCount: Int, seriesCount: Int) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val serverUrl = account.serverUrl.trimEnd('/')
+        val username = account.username
+        val password = account.password
+        val accountKey = "${serverUrl}_$username"
+        val cacheManager = IptvCacheManager(this@MainActivity)
+
+        // Reset cache in memoria e su disco
+        LiveTvCache.clear()
+        MoviesCache.clear()
+        SeriesCache.clear()
+        cacheManager.clearAll(accountKey)
+
+        var liveCount = 0
+        var moviesCount = 0
+        var seriesCount = 0
+
+        try {
+            val liveCatUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_live_categories"
+            val liveStreamUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_live_streams"
+            val movCatUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_vod_categories"
+            val movStreamUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_vod_streams"
+            val serCatUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_series_categories"
+            val serStreamUrl = "$serverUrl/player_api.php?username=$username&password=$password&action=get_series"
+
+            val liveCatDeferred = async { NetworkUtils.fetchUrlOptimized(liveCatUrl) }
+            val liveStreamDeferred = async { NetworkUtils.fetchUrlOptimized(liveStreamUrl) }
+            val movCatDeferred = async { NetworkUtils.fetchUrlOptimized(movCatUrl) }
+            val movStreamDeferred = async { NetworkUtils.fetchUrlOptimized(movStreamUrl) }
+            val serCatDeferred = async { NetworkUtils.fetchUrlOptimized(serCatUrl) }
+            val serStreamDeferred = async { NetworkUtils.fetchUrlOptimized(serStreamUrl) }
+
+            // Live TV
+            val liveCatText = liveCatDeferred.await().trim()
+            val liveStreamText = liveStreamDeferred.await().trim()
+            val fetchedLiveCat = mutableListOf<LiveCategory>()
+            val fetchedLiveChan = mutableListOf<LiveChannel>()
+            fetchedLiveCat.add(LiveCategory("FAVORITES", "PREFERITI"))
+
+            if (liveCatText.startsWith("[")) {
+                val arr = JSONArray(liveCatText)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    fetchedLiveCat.add(LiveCategory(obj.optString("category_id"), obj.optString("category_name")))
+                }
+            }
+            if (liveStreamText.startsWith("[")) {
+                val arr = JSONArray(liveStreamText)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    fetchedLiveChan.add(
+                        LiveChannel(
+                            streamId = obj.optString("stream_id"),
+                            name = obj.optString("name"),
+                            categoryId = obj.optString("category_id"),
+                            streamIcon = obj.optString("stream_icon").takeIf { it.isNotBlank() }
+                        )
+                    )
+                }
+            }
+            liveCount = fetchedLiveChan.size
+            cacheManager.saveLiveCache(accountKey, fetchedLiveCat, fetchedLiveChan)
+            LiveTvCache.categories = fetchedLiveCat
+            LiveTvCache.channels = fetchedLiveChan
+
+            // Film
+            val movCatText = movCatDeferred.await().trim()
+            val movStreamText = movStreamDeferred.await().trim()
+            val fetchedMovCat = mutableListOf<CategoryItem>()
+            fetchedMovCat.add(CategoryItem("ALL", "TUTTI I FILM"))
+            fetchedMovCat.add(CategoryItem("FAVORITES", "PREFERITI"))
+            fetchedMovCat.add(CategoryItem("CONTINUE", "CONTINUA A GUARDARE"))
+            fetchedMovCat.add(CategoryItem("RECENT", "AGGIUNTI DI RECENTE"))
+
+            if (movCatText.startsWith("[")) {
+                val arr = JSONArray(movCatText)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    fetchedMovCat.add(CategoryItem(obj.optString("category_id"), obj.optString("category_name")))
+                }
+            }
+            val fetchedMovies = mutableListOf<MovieItem>()
+            if (movStreamText.startsWith("[")) {
+                val arr = JSONArray(movStreamText)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val rawIcon = obj.optString("stream_icon").ifEmpty { obj.optString("cover") }
+                    val fullIcon = getAbsoluteImageUrl(serverUrl, rawIcon)
+                    val addedStr = obj.optString("added").ifEmpty { obj.optString("release_date") }
+
+                    fetchedMovies.add(
+                        MovieItem(
+                            streamId = obj.optString("stream_id"),
+                            title = obj.optString("name", "Senza Titolo"),
+                            categoryId = obj.optString("category_id"),
+                            coverUrl = fullIcon,
+                            releaseDate = obj.optString("release_date", obj.optString("added")),
+                            addedDate = addedStr,
+                            containerExtension = obj.optString("container_extension", "mp4")
+                        )
+                    )
+                }
+            }
+            moviesCount = fetchedMovies.size
+            cacheManager.saveMoviesCache(accountKey, fetchedMovCat, fetchedMovies)
+            MoviesCache.categories = fetchedMovCat
+            MoviesCache.moviesList = fetchedMovies
+
+            // Serie TV
+            val serCatText = serCatDeferred.await().trim()
+            val serStreamText = serStreamDeferred.await().trim()
+            val fetchedSerCat = mutableListOf<SeriesCategory>()
+            fetchedSerCat.add(SeriesCategory("ALL", "TUTTE LE SERIE"))
+            fetchedSerCat.add(SeriesCategory("FAVORITES", "PREFERITI"))
+            fetchedSerCat.add(SeriesCategory("CONTINUE", "CONTINUA A GUARDARE"))
+            fetchedSerCat.add(SeriesCategory("RECENT", "AGGIUNTI DI RECENTE"))
+
+            if (serCatText.startsWith("[")) {
+                val arr = JSONArray(serCatText)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    fetchedSerCat.add(SeriesCategory(obj.optString("category_id"), obj.optString("category_name")))
+                }
+            }
+            val fetchedSeries = mutableListOf<SeriesData>()
+            if (serStreamText.startsWith("[")) {
+                val arr = JSONArray(serStreamText)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val rawCover = obj.optString("cover")
+                    val fullCover = getAbsoluteImageUrl(serverUrl, rawCover)
+                    val lastMod = obj.optString("last_modified").ifEmpty { obj.optString("added") }
+
+                    fetchedSeries.add(
+                        SeriesData(
+                            seriesId = obj.optString("series_id"),
+                            title = obj.optString("name"),
+                            coverUrl = fullCover,
+                            categoryId = obj.optString("category_id"),
+                            releaseDate = obj.optString("releaseDate", obj.optString("last_modified")),
+                            lastModified = lastMod,
+                            rating = obj.optString("rating_5based", "0").toFloatOrNull() ?: 0f
+                        )
+                    )
+                }
+            }
+            seriesCount = fetchedSeries.size
+            cacheManager.saveSeriesCache(accountKey, fetchedSerCat, fetchedSeries)
+            SeriesCache.categories = fetchedSerCat
+            SeriesCache.seriesList = fetchedSeries
+
+            withContext(Dispatchers.Main) {
+                onComplete(liveCount, moviesCount, seriesCount)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                onComplete(-1, -1, -1)
             }
         }
     }
