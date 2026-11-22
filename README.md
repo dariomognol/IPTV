@@ -1,2 +1,2 @@
-Code for AFT: 5865368
-http://aftv.news/5865368
+Code for AFT: 2256686
+http://aftv.news/2256686
